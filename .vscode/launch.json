@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run src/run.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/run.py",
+            "console": "integratedTerminal",
+            "args": [],
+            "cwd": "${workspaceFolder}/src"
+        }
+    ]
+}
