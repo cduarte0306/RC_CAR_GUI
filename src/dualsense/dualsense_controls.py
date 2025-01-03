@@ -5,17 +5,8 @@ from threading import Thread, Lock
 import time
 import ctypes
 
-from enum import Enum, auto
 from network.udp_client import UDPCLient
 
-
-class ControllerEvents(Enum):
-    
-    SQUARE_PRESSED    = 0
-    X_PRESSED         = auto()
-    L_JOYSTICK_MOVED  = auto()
-    R_JOYSTICK_MOVED = auto()
-    
 
 class DualSense:
 
@@ -124,32 +115,6 @@ class DualSense:
         except Exception as e:
             return False
         
-        return True
-    
-
-
-    def connect_to_event( self, event : int, callback ) -> bool:
-        """
-        Connects to 
-
-        Args:
-            event (int): _description_
-            callback (function): _description_
-
-        Returns:
-            bool: _description_
-        """
-
-        if callback == None:
-            return False
-
-        match event:
-            case ControllerEvents.SQUARE_PRESSED.value()  : self.__ds.square_pressed         += callback
-            case ControllerEvents.X_PRESSED.value()       : self.__ds.cross_pressed          += callback
-            case ControllerEvents.L_JOYSTICK_MOVED.value(): self.__ds.left_joystick_changed  += callback
-            case ControllerEvents.R_JOYSTICK_MOVED.value(): self.__ds.right_joystick_changed += callback
-            case _: return False
-
         return True
     
 
