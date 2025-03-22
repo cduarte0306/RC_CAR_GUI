@@ -5,31 +5,25 @@ from threading import Lock
 
 class UDPCLient:
 
-    PORT = 5555
+    CAR_STATIC_IP = "192.168.1.10"
+    PORT = 57345
 
     def __init__(self) -> None:
         self.__socket_mutex = Lock()
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__server_ip : str = ""
+        self.__timeout : int = 5  # 5 seconds default timeout
 
 
-    def open_connection( self, ip : str ) -> bool:
+    def set_timeout(self, timeout: float) -> None:
         """
-        Handles the openning of the connection
+        Set a timeout for the socket operations.
 
         Args:
-            ip (str): IP address to connect to
-
-        Returns:
-            bool:
-                - TRUE:     Connection succesful
-                - FALSE: Failed to connect
+            timeout (float): Timeout in seconds. Use None for blocking mode.
         """
-        if len( ip ) == 0:
-            return False
-        
-        self.__server_ip = ip
-        return True
+        self.__timeout = timeout
+        self.__socket.settimeout(self.__timeout)
     
 
     def send( self, data: bytes ) -> bool:
@@ -44,10 +38,18 @@ class UDPCLient:
                 - TRUE: Transmitted data succesfully
                 - FALSE: Failed to transmit data
         """
-        if not len(self.__server_ip):
+        try:
+            self.__socket.sendto( data, (UDPCLient.CAR_STATIC_IP, UDPCLient.PORT ) )
+        except:
             return False
         
-        self.__socket.sendto( data, (self.__server_ip, UDPCLient.PORT ) )
+        return True
 
 
+    def receive_data( self ) -> bytes:
+        data: bytes = self.__socket.recvfrom(4096)
+        if data == None:
+            return b''
         
+        return data
+
