@@ -1,6 +1,6 @@
-from dualsense.dualsense_controls import DualSense
+from car_controls.controller import Controller
 
 
 if __name__ == '__main__':
-    ds = DualSense()
+    ds = Controller()
     print("Hello world!")
