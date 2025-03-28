@@ -2,6 +2,8 @@ import socket
 import struct
 from threading import Lock
 
+from network.ntp_server import NTPServer
+
 
 class UDPCLient:
 
@@ -13,6 +15,7 @@ class UDPCLient:
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__server_ip : str = ""
         self.__timeout : int = 5  # 5 seconds default timeout
+        self.__ntp_server = NTPServer()
 
 
     def set_timeout(self, timeout: float) -> None:
