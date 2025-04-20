@@ -65,6 +65,7 @@ class Controller:
             print(e)
             return
         
+        
         self.__msg_id : int = 0
         
         self.__udp_client = UDPCLient()

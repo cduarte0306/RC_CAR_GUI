@@ -1,162 +1,211 @@
+import datetime
 import socket
 import struct
-import ctypes
 import time
-from threading import Lock, Thread
+import threading
+import select
+import queue
+
+# --- Helper Functions ---
+
+def system_to_ntp_time(timestamp):
+    return timestamp + NTP.NTP_DELTA
+
+def _to_int(timestamp):
+    return int(timestamp)
+
+def _to_frac(timestamp, n=32):
+    return int(abs(timestamp - _to_int(timestamp)) * 2**n)
+
+def _to_time(integ, frac, n=32):
+    return integ + float(frac)/2**n
 
 
+# --- Exception ---
 
-class NTPPacket(ctypes.Structure):
-    _fields_ = [
-        ( "li_vn_mode"         , ctypes.c_uint8  ),
-        ( "stratum"            , ctypes.c_uint8  ),
-        ( "poll"               , ctypes.c_uint8  ),
-        ( "precision"          , ctypes.c_int8   ),
-        ( "root_delay"         , ctypes.c_int32  ),
-        ( "root_dispersion"    , ctypes.c_int32  ),
-        ( "ref_id"             , ctypes.c_uint32 ),
-        ( "ref_timestamp_secs" , ctypes.c_uint32 ),
-        ( "ref_timestamp_fraq" , ctypes.c_uint32 ),
-        ( "orig_timestamp_secs", ctypes.c_uint32 ),
-        ( "orig_timestamp_fraq", ctypes.c_uint32 ),
-        ( "recv_timestamp_secs", ctypes.c_uint32 ),
-        ( "recv_timestamp_fraq", ctypes.c_uint32 ),
-        ( "tx_timestamp_secs"  , ctypes.c_uint32 ),
-        ( "tx_timestamp_fraq"  , ctypes.c_uint32 ),
-    ]
+class NTPException(Exception):
+    pass
 
+
+# --- NTP Constants ---
+
+class NTP:
+    _SYSTEM_EPOCH = datetime.date(*time.gmtime(0)[0:3])
+    _NTP_EPOCH = datetime.date(1900, 1, 1)
+    NTP_DELTA = (_SYSTEM_EPOCH - _NTP_EPOCH).days * 24 * 3600
+
+    REF_ID_TABLE = {
+        'DNC': "DNC routing protocol",
+        'NIST': "NIST public modem",
+        'TSP': "TSP time protocol",
+        'DTS': "Digital Time Service",
+        'ATOM': "Atomic clock (calibrated)",
+        'VLF': "VLF radio (OMEGA, etc)",
+        'callsign': "Generic radio",
+        'LORC': "LORAN-C radionavidation",
+        'GOES': "GOES UHF environment satellite",
+        'GPS': "GPS UHF satellite positioning",
+    }
+
+    STRATUM_TABLE = {
+        0: "unspecified",
+        1: "primary reference",
+    }
+
+    MODE_TABLE = {
+        0: "unspecified",
+        1: "symmetric active",
+        2: "symmetric passive",
+        3: "client",
+        4: "server",
+        5: "broadcast",
+        6: "reserved for NTP control messages",
+        7: "reserved for private use",
+    }
+
+    LEAP_TABLE = {
+        0: "no warning",
+        1: "last minute has 61 seconds",
+        2: "last minute has 59 seconds",
+        3: "alarm condition (clock not synchronized)",
+    }
+
+
+# --- NTP Packet Structure ---
+
+class NTPPacket:
+    _PACKET_FORMAT = "!B B B b 11I"
+
+    def __init__(self, version=2, mode=3, tx_timestamp=0):
+        self.leap = 0
+        self.version = version
+        self.mode = mode
+        self.stratum = 0
+        self.poll = 0
+        self.precision = 0
+        self.root_delay = 0
+        self.root_dispersion = 0
+        self.ref_id = 0
+        self.ref_timestamp = 0
+        self.orig_timestamp = 0
+        self.orig_timestamp_high = 0
+        self.orig_timestamp_low = 0
+        self.recv_timestamp = 0
+        self.tx_timestamp = tx_timestamp
+        self.tx_timestamp_high = 0
+        self.tx_timestamp_low = 0
+
+    def to_data(self):
+        try:
+            packed = struct.pack(NTPPacket._PACKET_FORMAT,
+                (self.leap << 6 | self.version << 3 | self.mode),
+                self.stratum,
+                self.poll,
+                self.precision,
+                _to_int(self.root_delay) << 16 | _to_frac(self.root_delay, 16),
+                _to_int(self.root_dispersion) << 16 | _to_frac(self.root_dispersion, 16),
+                self.ref_id,
+                _to_int(self.ref_timestamp),
+                _to_frac(self.ref_timestamp),
+                self.orig_timestamp_high,
+                self.orig_timestamp_low,
+                _to_int(self.recv_timestamp),
+                _to_frac(self.recv_timestamp),
+                _to_int(self.tx_timestamp),
+                _to_frac(self.tx_timestamp))
+        except struct.error:
+            raise NTPException("Invalid NTP packet fields.")
+        return packed
+
+    def from_data(self, data):
+        try:
+            unpacked = struct.unpack(NTPPacket._PACKET_FORMAT,
+                    data[0:struct.calcsize(NTPPacket._PACKET_FORMAT)])
+        except struct.error:
+            raise NTPException("Invalid NTP packet.")
+
+        self.leap = unpacked[0] >> 6 & 0x3
+        self.version = unpacked[0] >> 3 & 0x7
+        self.mode = unpacked[0] & 0x7
+        self.stratum = unpacked[1]
+        self.poll = unpacked[2]
+        self.precision = unpacked[3]
+        self.root_delay = float(unpacked[4]) / 2**16
+        self.root_dispersion = float(unpacked[5]) / 2**16
+        self.ref_id = unpacked[6]
+        self.ref_timestamp = _to_time(unpacked[7], unpacked[8])
+        self.orig_timestamp = _to_time(unpacked[9], unpacked[10])
+        self.orig_timestamp_high = unpacked[9]
+        self.orig_timestamp_low = unpacked[10]
+        self.recv_timestamp = _to_time(unpacked[11], unpacked[12])
+        self.tx_timestamp = _to_time(unpacked[13], unpacked[14])
+        self.tx_timestamp_high = unpacked[13]
+        self.tx_timestamp_low = unpacked[14]
+
+    def GetTxTimeStamp(self):
+        return (self.tx_timestamp_high, self.tx_timestamp_low)
+
+    def SetOriginTimeStamp(self, high, low):
+        self.orig_timestamp_high = high
+        self.orig_timestamp_low = low
+
+
+# --- NTP Server Class ---
 
 class NTPServer:
+    def __init__(self, ip="0.0.0.0", port=123, version=3, stratum=2):
+        self.ip = ip
+        self.port = port
+        self.version = version
+        self.stratum = stratum
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("", self.port))
+        self.task_queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self.recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self.work_thread = threading.Thread(target=self._work_loop, daemon=True)
 
-    NTP_EPOCH = 2208988800  # NTP epoch starts on Jan 1, 1900
-
-    
-    def __init__(self) -> None:
-        self.__server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.__server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.__server.bind( ("", 123) )  # NTP port
-
-        # Here, we start the server thread
-        self.__server_thread = Thread(target=self.__server_thread)
-        self.__server_thread.start()
+        self.recv_thread.start()
+        self.work_thread.start()
 
 
-    def __server_thread(self) -> None:
-        """
-        Main server thread that listens for incoming NTP requests and sends responses.
-        """
+    def stop(self):
+        print("Stopping NTP server...")
+        self._stop_event.set()
+        self.recv_thread.join()
+        self.work_thread.join()
+        self.socket.close()
+        print("NTP server stopped.")
 
-        while True:
-            data, addr = self.__receive_data()
-            if data == b'':
-                continue
+    def _recv_loop(self):
+        while not self._stop_event.is_set():
+            rlist, _, _ = select.select([self.socket], [], [], 1)
+            for sock in rlist:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    recv_timestamp = system_to_ntp_time(time.time())
+                    self.task_queue.put((data, addr, recv_timestamp))
+                except socket.error as e:
+                    print("Socket error:", e)
 
-            # Grab the reception time
-            reception_timestamp : int = int(time.time())
-            
+    def _work_loop(self):
+        while not self._stop_event.is_set():
             try:
-                ntp_packet : NTPPacket = self.__parse_packet(data, reception_timestamp)
-            except Exception as e:
-                print(e)
-                
-            self.__send_data(ntp_packet, addr[0], addr[1])
+                data, addr, recv_timestamp = self.task_queue.get(timeout=1)
+                recv_packet = NTPPacket()
+                recv_packet.from_data(data)
 
+                tx_high, tx_low = recv_packet.GetTxTimeStamp()
+                send_packet = NTPPacket(version=self.version, mode=4)
+                send_packet.stratum = self.stratum
+                send_packet.poll = 10
+                send_packet.ref_timestamp = recv_timestamp - 5
+                send_packet.SetOriginTimeStamp(tx_high, tx_low)
+                send_packet.recv_timestamp = recv_timestamp
+                send_packet.tx_timestamp = system_to_ntp_time(time.time())
 
-    def __htonl_ctypes(self, val: ctypes.c_uint32) -> ctypes.c_uint32:
-        v = val.value
-        swapped = ((v & 0x000000FF) << 24) | \
-                  ((v & 0x0000FF00) << 8)  | \
-                  ((v & 0x00FF0000) >> 8)  | \
-                  ((v & 0xFF000000) >> 24)
-        return ctypes.c_uint32(swapped)
-
-
-    def __ntohl_ctypes(self, val: ctypes.c_uint32) -> ctypes.c_uint32:
-        v = val.value
-        swapped = ((v & 0x000000FF) << 24) | \
-                  ((v & 0x0000FF00) << 8)  | \
-                  ((v & 0x00FF0000) >> 8)  | \
-                  ((v & 0xFF000000) >> 24)
-        return ctypes.c_uint32(swapped)
-
-
-    def __parse_packet(self, data: bytes, reception_timeout : int) -> NTPPacket:
-        """
-        Parse an incoming NTP packet.
-
-        Args:
-            data (bytes): Raw data from the client
-            reception_timeout (int): Reception time for the packet
-
-        Returns:
-            NTPPacket: Parsed NTP packet
-        """
-        ntp_packet_in: NTPPacket = NTPPacket.from_buffer_copy(data)
-
-        ntp_packet_out: NTPPacket = NTPPacket()
-
-        # Current time for all time-related fields
-        recv_secs, recv_fraq = self.__time_to_ntp_ts(reception_timeout)
-        
-        # Header fields
-        ntp_packet_out.li_vn_mode = (0b00 << 6) | (0b100 << 3) | 0b100  # LI=0, VN=4, Mode=3 (server)
-
-        ntp_packet_out.stratum = 1
-        ntp_packet_out.poll = 4
-        ntp_packet_out.precision = -6  # ~15.625 ms
-
-        # Reference information
-        ntp_packet_out.root_delay = 0
-        ntp_packet_out.root_dispersion = 0
-        ntp_packet_out.ref_id = self.__ntohl_ctypes(ctypes.c_uint32(0x47505300))  # "GPS\0" as an example ref ID for a stratum 1 clock
-
-        # Timestamps
-        ntp_packet_out.ref_timestamp_secs = self.__ntohl_ctypes(recv_secs)
-        ntp_packet_out.ref_timestamp_fraq = self.__ntohl_ctypes(recv_fraq)
-
-        ntp_packet_out.orig_timestamp_secs = self.__ntohl_ctypes(ctypes.c_uint32(ntp_packet_in.tx_timestamp_secs))
-        ntp_packet_out.orig_timestamp_fraq = self.__ntohl_ctypes(ctypes.c_uint32(ntp_packet_in.tx_timestamp_fraq))
-
-        ntp_packet_out.recv_timestamp_secs = self.__ntohl_ctypes(recv_secs)
-        ntp_packet_out.recv_timestamp_fraq = self.__ntohl_ctypes(recv_secs)
-
-        tx_secs, tx_fraq = self.__time_to_ntp_ts(time.time())  # Recompute slightly later for TX
-        ntp_packet_out.tx_timestamp_secs = self.__ntohl_ctypes(tx_secs)
-        ntp_packet_out.tx_timestamp_fraq = self.__ntohl_ctypes(tx_fraq)
-
-        return ntp_packet_out
-
-
-    def __time_to_ntp_ts(self, t: int) -> tuple[ctypes.c_uint32, ctypes.c_uint32]:
-        """
-        Convert a UNIX timestamp (seconds since 1970) to NTP timestamp format.
-        
-        Returns:
-            Tuple of (seconds, fraction) as ctypes.c_uint32
-        """
-        ntp_sec = int(t + self.NTP_EPOCH)
-        ntp_frac = int((t % 1) * (2**32))  # Fractional part if t is float, but t is int so this is 0
-
-        return ctypes.c_uint32(ntp_sec), ctypes.c_uint32(ntp_frac)
-
-
-    def __receive_data(self) -> bytes:
-        data: bytes = self.__server.recvfrom(1024)
-        if data == None:
-            return b''
-        
-        return data
-
-
-    def __send_data(self, data: bytes, addr: str, port: int) -> bool:
-        try:
-            self.__server.sendto( data, (addr, port) )
-        except:
-            return False
-        
-        return True
-    
-
-    def close(self) -> None:
-        self.__server.close()
+                self.socket.sendto(send_packet.to_data(), addr)
+                print(f"Responded to {addr[0]}:{addr[1]}")
+            except queue.Empty:
+                continue
 

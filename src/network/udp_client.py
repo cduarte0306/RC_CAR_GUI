@@ -15,7 +15,7 @@ class UDPCLient:
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__server_ip : str = ""
         self.__timeout : int = 5  # 5 seconds default timeout
-        self.__ntp_server = NTPServer()
+        self.__ntp_server = NTPServer(ip=self.CAR_STATIC_IP)
 
 
     def set_timeout(self, timeout: float) -> None:
