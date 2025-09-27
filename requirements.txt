@@ -1,1 +1,2 @@
 pydualsense
+zeroconf

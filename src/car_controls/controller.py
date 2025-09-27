@@ -93,10 +93,7 @@ class Controller:
 
         # Stat the UDP transmission thread
         self.__controller_thread = Thread(target=self.__transmission_thread)
-        self.__reception_thread  = Thread(target=self.__data_reception_thread)
-
         self.__controller_thread.start()
-        self.__reception_thread.start()
 
         self.__controller_thread.join()
         self.__reception_thread.join()
@@ -166,36 +163,49 @@ class Controller:
         return True
     
 
-    def __transmission_thread( self ) -> None:
+    def __transmission_thread(self) -> None:
         """
         Main transmission thread
         """
-        
-        packet : clientReq = clientReq()
-        
+        packet: clientReq = clientReq()
+        thread_pool: list = []
+        receive_thread : Thread
+
+        def data_reception_thread(pool: list) -> None:
+            """
+            Main reception thread
+            """
+            data: bytes = self.__udp_client.receive_data()
+            pool.pop()
+
         while True:
             try:
-                # Get the next request from the queue
-                req = self.__queue.get(timeout=1)  # Wait for 1 second for an item
-                
+                req = self.__queue.get(timeout=1)
                 self.__queue.task_done()
             except queue.Empty:
                 continue
-            
+
             packet.sequence_id = self.__msg_id
             packet.payload     = req
             packet.msg_length  = ctypes.sizeof(payload)
 
-            payload_bytes      = ctypes.string_at(ctypes.addressof(packet.payload), ctypes.sizeof(packet.payload))
-            packet.crc32       = Toolbox.crc32(payload_bytes)
+            payload_bytes      = ctypes.string_at(ctypes.addressof(packet.payload),
+                                                ctypes.sizeof(packet.payload))
             self.__msg_id     += 1
 
-            self.__udp_client.send( ctypes.string_at(ctypes.addressof(packet), ctypes.sizeof(packet)) )
+            self.__udp_client.send(
+                ctypes.string_at(ctypes.addressof(packet), ctypes.sizeof(packet))
+            )
 
+            if len(thread_pool) > 99:
+                continue
 
-    def __data_reception_thread( self ) -> None:
-        """
-        Main reception thread
-        """
-        while True:
-            pass
+            recv_thread = Thread(
+                target=data_reception_thread,
+                daemon=True,
+                args=(thread_pool,)  # ✅ fixed
+            )
+
+            thread_pool.append(recv_thread)
+            recv_thread.start()
+
