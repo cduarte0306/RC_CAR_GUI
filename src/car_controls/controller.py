@@ -6,6 +6,7 @@ import queue
 import time
 import ctypes
 import asyncio
+import logging
 
 from network.udp_client import UDPCLient
 from enum import Enum, auto
@@ -62,7 +63,7 @@ class Controller:
         try:
             self.__ds.init()
         except Exception as e:
-            print(e)
+            logging.error("Failed to initialize the controller: %s", e)
             return
         
         self.__msg_id : int = 0
