@@ -10,8 +10,6 @@ import logging
 
 
 class UDPCLient:
-
-    CAR_STATIC_IP = "192.168.1.10"
     PORT = 65000
 
     def __init__(self) -> None:

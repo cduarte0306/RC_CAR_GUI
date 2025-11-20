@@ -54,6 +54,13 @@ class clientReq(ctypes.Structure):
         ("payload",     payload),        # Directly reference __payload
         ("crc32", ctypes.c_uint32),
     ]
+
+class clientReply(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("data",  val_type_t),
+        ("state", ctypes.c_bool)
+    ]
     
 class Controller:
 
@@ -200,6 +207,8 @@ class Controller:
             Main reception thread - receives data until shutdown is signaled
             """
             _buffer : CircularBuffer = buff
+            reply = clientReply()
+            
             while not self.__shutdown_event.is_set():
                 if _buffer.empty():
                     continue
@@ -207,6 +216,13 @@ class Controller:
                 data: bytes = self.__udp_client.receive_data()
                 if data is None:
                     continue
+
+                ctypes.memmove(
+                    ctypes.addressof(reply),  # Destination address
+                    data,                     # Source data
+                    ctypes.sizeof(reply)      # Number of bytes to copy
+                )
+                
 
         recv_thread = Thread(
             target=data_reception_thread,
