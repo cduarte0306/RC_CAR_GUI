@@ -1,6 +1,6 @@
 import socket
 import struct
-from threading import Lock
+from threading import Lock, Event
 
 from threading import Thread
 import time
@@ -19,8 +19,9 @@ class UDPCLient:
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__server_ip : str = ""
         self.__timeout : int = 5  # 5 seconds default timeout
-        thread = Thread(target=self.__search_hostname)
-        thread.daemon = True
+        self.__shutdown_event = Event()
+        
+        thread = Thread(target=self.__search_hostname, daemon=True)
         thread.start()
 
 
@@ -28,14 +29,18 @@ class UDPCLient:
         """
         Hostname search service
         """
-        while True:
-            ip = socket.gethostbyname("rc-car-machine.local")
-            if len(ip) > 0:
-                self.__server_ip = ip
-                logging.info("Found RC car at address %s", self.__server_ip)
-                break
+        while not self.__shutdown_event.is_set():
+            try:
+                ip = socket.gethostbyname("rc-car-machine.local")
+                if len(ip) > 0:
+                    self.__server_ip = ip
+                    logging.info("Found RC car at address %s", self.__server_ip)
+                    break
+            except:
+                pass
             
-            time.sleep(5)
+            # Use wait instead of sleep for graceful shutdown
+            self.__shutdown_event.wait(timeout=5)
 
 
     def set_timeout(self, timeout: float) -> None:
@@ -70,8 +75,29 @@ class UDPCLient:
 
 
     def receive_data(self) -> bytes | None:
+        """
+        Receive data from the socket. Returns None if socket is closed or timeout occurs.
+        
+        Returns:
+            bytes | None: Received data or None if no data or socket error
+        """
         try:
             data, addr = self.__socket.recvfrom(4096)  # no flags on Windows
             return data
-        except TimeoutError:
+        except (TimeoutError, OSError, socket.error):
+            # OSError 10022 occurs when socket is closed during receive
+            # Return None to signal thread to exit gracefully
             return None
+
+
+    def shutdown(self) -> None:
+        """
+        Gracefully shutdown the UDP client and close the socket
+        """
+        logging.info("Shutting down UDP client...")
+        self.__shutdown_event.set()
+        
+        try:
+            self.__socket.close()
+        except Exception as e:
+            logging.error("Error closing socket: %s", e)
