@@ -1,6 +1,6 @@
 from pydualsense import pydualsense, TriggerModes
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import queue
 
 import time
@@ -11,7 +11,7 @@ import logging
 from network.udp_client import UDPCLient
 from enum import Enum, auto
 
-from utils.utilities import Toolbox
+from utils.utilities import Toolbox, CircularBuffer
 
 
 class commands(Enum):
@@ -54,6 +54,13 @@ class clientReq(ctypes.Structure):
         ("payload",     payload),        # Directly reference __payload
         ("crc32", ctypes.c_uint32),
     ]
+
+class clientReply(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("data",  val_type_t),
+        ("state", ctypes.c_bool)
+    ]
     
 class Controller:
 
@@ -76,6 +83,9 @@ class Controller:
         self.__mutex = Lock()
         self.__queue = queue.Queue()
         
+        # Shutdown event for graceful thread termination
+        self.__shutdown_event = Event()
+        
         # Set touchpad color to red
         self.__ds.light.setColorI(255, 255, 0)
 
@@ -91,12 +101,9 @@ class Controller:
 
         self.__transmission_structure = dataOut()
 
-        # Stat the UDP transmission thread
-        self.__controller_thread = Thread(target=self.__transmission_thread)
+        # Start the UDP transmission thread (do NOT join here - it's infinite)
+        self.__controller_thread = Thread(target=self.__transmission_thread, daemon=False)
         self.__controller_thread.start()
-
-        self.__controller_thread.join()
-        self.__reception_thread.join()
 
 
     def __cross_pressed( self, state : bool ) -> None:
@@ -125,7 +132,8 @@ class Controller:
         """
         Left joystick handler
         """
-        msg  : payload    = payload()
+        msg_1  : payload    = payload()
+        msg_2  : payload    = payload()
         data : val_type_t = val_type_t()
 
         if abs( self.__last_joystick_x - x ) > 2:
@@ -133,10 +141,14 @@ class Controller:
 
         data.i = x
 
-        msg.command_id = commands.CMD_STEER.value
-        msg.data       = data
+        msg_1.command_id = commands.CMD_STEER.value
+        msg_1.data       = data
 
-        self.__queue.put(msg)
+        self.__queue.put(msg_1)
+        data.i = y
+        msg_2.command_id = commands.CMD_FWD_DIR.value
+        msg_2.data       = data
+        self.__queue.put(msg_2)
 
 
     def __r_joystick( self, x : int, y : int ) -> None:
@@ -163,22 +175,63 @@ class Controller:
         return True
     
 
+    def shutdown(self) -> None:
+        """
+        Gracefully shutdown all threads and clean up resources
+        """
+        logging.info("Shutting down controller threads...")
+        self.__shutdown_event.set()
+        
+        # Shutdown UDP client to close socket
+        self.__udp_client.shutdown()
+        
+        # Wait for transmission thread to finish
+        if self.__controller_thread.is_alive():
+            self.__controller_thread.join(timeout=5)
+            if self.__controller_thread.is_alive():
+                logging.warning("Transmission thread did not finish within timeout")
+        
+        logging.info("Controller threads shutdown complete")
+
+
     def __transmission_thread(self) -> None:
         """
         Main transmission thread
         """
         packet: clientReq = clientReq()
         thread_pool: list = []
-        receive_thread : Thread
+        buffer : CircularBuffer = CircularBuffer(100)
 
-        def data_reception_thread(pool: list) -> None:
+        def data_reception_thread(pool: list, buff:CircularBuffer) -> None:
             """
-            Main reception thread
+            Main reception thread - receives data until shutdown is signaled
             """
-            data: bytes = self.__udp_client.receive_data()
-            pool.pop()
+            _buffer : CircularBuffer = buff
+            reply = clientReply()
+            
+            while not self.__shutdown_event.is_set():
+                if _buffer.empty():
+                    continue
 
-        while True:
+                data: bytes = self.__udp_client.receive_data()
+                if data is None:
+                    continue
+
+                ctypes.memmove(
+                    ctypes.addressof(reply),  # Destination address
+                    data,                     # Source data
+                    ctypes.sizeof(reply)      # Number of bytes to copy
+                )
+                
+
+        recv_thread = Thread(
+            target=data_reception_thread,
+            daemon=True,
+            args=(thread_pool, buffer,)
+        )
+        recv_thread.start()
+
+        while not self.__shutdown_event.is_set():
             try:
                 req = self.__queue.get(timeout=1)
                 self.__queue.task_done()
@@ -192,20 +245,10 @@ class Controller:
             payload_bytes      = ctypes.string_at(ctypes.addressof(packet.payload),
                                                 ctypes.sizeof(packet.payload))
             self.__msg_id     += 1
-
             self.__udp_client.send(
                 ctypes.string_at(ctypes.addressof(packet), ctypes.sizeof(packet))
             )
 
-            if len(thread_pool) > 99:
-                continue
-
-            recv_thread = Thread(
-                target=data_reception_thread,
-                daemon=True,
-                args=(thread_pool,)  # ✅ fixed
-            )
-
-            thread_pool.append(recv_thread)
-            recv_thread.start()
-
+            # Send this request to the circular buffer so that the receive thread knows what should be expected
+            buffer.push(req)
+        recv_thread.join()

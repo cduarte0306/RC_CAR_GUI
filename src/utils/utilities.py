@@ -54,3 +54,49 @@ class Toolbox:
             index = (crc ^ byte) & 0xFF
             crc = (crc >> 8) ^ Toolbox.crc32_table[index]
         return crc ^ 0xFFFFFFFF
+    
+
+class CircularBuffer:
+    def __init__(self, size : int):
+        self.__head = 0
+        self.__tail = 0
+        self.__size = size
+        self.__list : list = [None] * size
+        
+
+    def push(self, val):
+        """
+        Push a new item to the buffer
+
+        Args:
+            val (_type_): _description_
+        """
+        self.__list[self.__head] = val
+        self.__head = (self.__head + 1) % self.__size
+
+    
+    def empty(self) -> bool:
+        """
+        See if the buffer is empty
+
+        Returns:
+            bool: True: buffer full
+                  False: Buffer empty
+        """
+        return self.__head == self.__tail
+    
+
+    def read(self) -> None:
+        """
+        Read and pop from the buffer
+
+        Returns:
+            int | None: _description_
+        """
+        if self.__head == self.__tail:
+            return None
+        
+        val = self.__list[self.__head]
+        self.__tail = (self.__tail + 1) % self.__size
+        return val
+    
