@@ -8,10 +8,12 @@ import ctypes
 import asyncio
 import logging
 
-from network.udp_client import UDPCLient
+from network.udp_client import UDP
 from enum import Enum, auto
 
-from utils.utilities import Toolbox, CircularBuffer
+from utils.utilities import Toolbox, CircularBuffer, Signal
+
+import numpy
 
 
 class commands(Enum):
@@ -62,23 +64,20 @@ class clientReply(ctypes.Structure):
         ("state", ctypes.c_bool)
     ]
     
+
 class Controller:
+    PORT = 65000
 
     def __init__( self ) -> None:
         self.__ds = pydualsense()
-
-        try:
-            self.__ds.init()
-        except Exception as e:
-            logging.error("Failed to initialize the controller: %s", e)
-            return
         
         self.__msg_id : int = 0
-        
-        self.__udp_client = UDPCLient()
+        self.__udp_client = UDP(Controller.PORT)
         
         self.__last_joystick_x : int = 0
         self.__last_joystick_y : int = 0
+
+        self.__triangleToggled = False
 
         self.__mutex = Lock()
         self.__queue = queue.Queue()
@@ -86,6 +85,22 @@ class Controller:
         # Shutdown event for graceful thread termination
         self.__shutdown_event = Event()
         
+        # Signals
+        self.controllerFound = Signal()
+        self.deviceFound     = Signal()
+        self.trianglePressed = Signal()
+
+        # Connect the signals
+        self.__udp_client.deviceFound.connect(lambda ip: self.deviceFound.emit(ip))
+
+        self.__transmission_structure = dataOut()
+
+        try:
+            self.__ds.init()
+        except Exception as e:
+            logging.error("Failed to initialize the controller: %s", e)
+            return
+
         # Set touchpad color to red
         self.__ds.light.setColorI(255, 255, 0)
 
@@ -98,8 +113,8 @@ class Controller:
         self.__ds.square_pressed         += self.__square_pressed
         self.__ds.left_joystick_changed  += self.__l_joystick
         self.__ds.right_joystick_changed += self.__r_joystick
+        self.__ds.triangle_pressed       += self.__trianglePressed
 
-        self.__transmission_structure = dataOut()
 
         # Start the UDP transmission thread (do NOT join here - it's infinite)
         self.__controller_thread = Thread(target=self.__transmission_thread, daemon=False)
@@ -150,6 +165,23 @@ class Controller:
         msg_2.data       = data
         self.__queue.put(msg_2)
 
+
+    def __trianglePressed(self, input:bool) -> None:
+        """
+        Triangle toggled handler
+
+        Args:
+            input (bool): button state
+        """
+        if not input: return
+        self.__triangleToggled = not self.__triangleToggled
+        logging.info("Triangle pressed: %s", "ON" if self.__triangleToggled else "OFF")
+
+        if self.__triangleToggled:
+            self.trianglePressed.emit(True)
+        else:
+            self.trianglePressed.emit(False)
+        
 
     def __r_joystick( self, x : int, y : int ) -> None:
         """

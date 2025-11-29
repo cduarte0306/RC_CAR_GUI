@@ -1,8 +1,12 @@
 from car_controls.controller import Controller
+from car_controls.VideoStreaming import VideoStreamer
 import logging
 import os
 import configparser
 from datetime import datetime
+import signal
+
+from utils.utilities import Emitter, Signal
 
 
 def init_logger() -> configparser.ConfigParser:
@@ -47,4 +51,10 @@ if __name__ == "__main__":
         parser["version"]["PATCH"]
     )
 
+    streamer = VideoStreamer(parser["settings"]["video_path"])
     ds = Controller()
+
+    # ds.deviceFound.connect(lambda ip: streamer.startStream(ip))
+    ds.deviceFound.connect(lambda ip: streamer.startStream(ip))
+    ds.trianglePressed.connect(lambda state: streamer.startStreamOut(state))
+    # ds.trianglePressed.connect(lambda state: pass)

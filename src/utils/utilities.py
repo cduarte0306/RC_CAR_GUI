@@ -96,7 +96,47 @@ class CircularBuffer:
         if self.__head == self.__tail:
             return None
         
-        val = self.__list[self.__head]
+        val = self.__list[self.__head - 1]
         self.__tail = (self.__tail + 1) % self.__size
         return val
+
+
+class Signal:
+    """A simple custom signal implementation."""
+
+    def __init__(self):
+        self._callbacks = []
+
+
+    def connect(self, callback):
+        """Connects a callback function to the signal."""
+        if callable(callback) and callback not in self._callbacks:
+            self._callbacks.append(callback)
+
+
+    def disconnect(self, callback):
+        """Disconnects a callback function from the signal."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+
+    def emit(self, *args, **kwargs):
+        """Emits the signal, calling all connected callbacks."""
+        for callback in self._callbacks:
+            try:
+                callback(*args, **kwargs)
+            except Exception as e:
+                print(f"Error in callback {callback.__name__}: {e}")
+
+class Emitter:
+    """An example class that emits a custom signal."""
+
+    def __init__(self):
+        self.value_changed = Signal()
+
+
+    def set_value(self, new_value):
+        print(f"Setting value to: {new_value}")
+        # Emit the signal when the value changes
+        self.value_changed.emit(new_value)
     
