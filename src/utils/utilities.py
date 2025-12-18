@@ -1,3 +1,4 @@
+import threading
 
 
 class Toolbox:
@@ -62,6 +63,7 @@ class CircularBuffer:
         self.__tail = 0
         self.__size = size
         self.__list : list = [None] * size
+        self.__lock = threading.Lock()
         
 
     def push(self, val):
@@ -71,8 +73,9 @@ class CircularBuffer:
         Args:
             val (_type_): _description_
         """
-        self.__list[self.__head] = val
-        self.__head = (self.__head + 1) % self.__size
+        with self.__lock:
+            self.__list[self.__head] = val
+            self.__head = (self.__head + 1) % self.__size
 
     
     def empty(self) -> bool:
@@ -83,7 +86,10 @@ class CircularBuffer:
             bool: True: buffer full
                   False: Buffer empty
         """
-        return self.__head == self.__tail
+        cond : bool
+        with self.__lock:
+            cond = self.__head == self.__tail
+        return cond
     
 
     def read(self) -> None:
@@ -93,11 +99,12 @@ class CircularBuffer:
         Returns:
             int | None: _description_
         """
-        if self.__head == self.__tail:
-            return None
-        
-        val = self.__list[self.__head - 1]
-        self.__tail = (self.__tail + 1) % self.__size
+        with self.__lock:
+            if self.__head == self.__tail:
+                return None
+            
+            val = self.__list[self.__tail]
+            self.__tail = (self.__tail + 1) % self.__size
         return val
 
 

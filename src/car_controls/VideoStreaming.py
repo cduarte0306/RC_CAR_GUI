@@ -9,6 +9,8 @@ import numpy as np
 import time
 import ctypes
 
+from utils.utilities import Signal
+
 
 MAX_UDP_PACKET_SIZE = 65507
 
@@ -35,7 +37,7 @@ class Frame(ctypes.Structure):
 class VideoStreamer:
     PORT = 5000
 
-    def __init__(self, path:str):
+    def __init__(self, streamInAdapter : UDP = None, streamOutAdapter : UDP = None, path:str = ""):
         self.__cap = None
 
         self.running = True
@@ -44,21 +46,30 @@ class VideoStreamer:
         self.__segmentMap : dict = {}
         self.__recvFrameID = None
         self.__receivedFrameBuff = bytearray()
+        self.__lastRecvFrameTime : float | None = None
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
-        self.__dispThread    = Thread(target=self.__imShowThread, daemon=True)
+        # self.__dispThread    = Thread(target=self.__imShowThread, daemon=True)
         self.__sendThread    = None  # Create on demand
         
         # Circular buffer
-        self.__frameBuffer = CircularBuffer(100)
+        self.__frameBuffer   = CircularBuffer(100)
+        self.__streamInBuff  = CircularBuffer(100)
+        self.__streamOutBuff = CircularBuffer(100)
+        
+        # Signals
+        self.sendFrameSignal = Signal()  # Emitted when a frame is ready to be sent out
 
         # Open receive socket (will do hostname lookup)
-        self.__streamSocket = UDP(VideoStreamer.PORT)
+        self.__streamSocket : UDP = streamInAdapter
+        # self.__streamSocket = UDP(VideoStreamer.PORT)
         
         # Outbound socket (direct IP - no hostname lookup needed)
-        self.__streamOutSocket = UDP(VideoStreamer.PORT, host="192.168.1.10")
-
+        # self.__streamOutSocket = UDP(VideoStreamer.PORT, host="192.168.1.10")
+        self.__streamOutSocket = streamOutAdapter
         self.__srcFile:str = path
+        
+        self.__receiveThread.start()
 
 
     def setVideoSource(self, srcFile:str) -> None:
@@ -72,16 +83,26 @@ class VideoStreamer:
 
 
     def startStream(self, ip: str) -> bool:
-        self.__streamSocket.bindSocket(VideoStreamer.PORT)
+        # self.__streamSocket.bindSocket(VideoStreamer.PORT)
 
         # Jetson sends RTP/JPEG, so ffmpeg needs params
-        self.__receiveThread.start()
-        self.__dispThread.start()
+        # self.__receiveThread.start()
+        # self.__dispThread.start()
 
         return True
     
     
-    def startStreamOut(self, state : bool ) -> None:
+    def setFrame(self, data: bytes) -> None:
+        """
+        Set the frame to be sent out
+
+        Args:
+            data (bytes): Frame data
+        """
+        self.__streamInBuff.push(data)
+
+
+    def startStreamOut(self, state : bool) -> None:
         """
         Start the out stream to the car
 
@@ -96,6 +117,32 @@ class VideoStreamer:
             # Create a new thread each time (threads can only be started once)
             self.__sendThread = Thread(target=self.__streamOutThread, daemon=True)
             self.__sendThread.start()
+
+
+    def getFrameOut(self) -> None | np.ndarray:
+        """
+        Handles the reading of the frame to be sent out
+
+        Returns:
+            None | np.ndarray: _description_
+        """
+        if self.__streamOutBuff.empty():
+            return None
+        
+        return self.__streamOutBuff.read()
+
+
+    def getFrameIn(self) -> None | np.ndarray:
+        """
+        Handles the reading of the frame
+
+        Returns:
+            None | np.ndarray: _description_
+        """
+        if self.__frameBuffer.empty():
+            return None
+        
+        return self.__frameBuffer.read()
 
 
     def __sendFrame(self, data: bytes) -> None:
@@ -145,10 +192,8 @@ class VideoStreamer:
                 ctypes.sizeof(frame)
             )
 
-            ret = self.__streamOutSocket.send(packet)
-            if not ret:
-                logging.error("Failed to transmit frame over UDP")
-                break
+            # self.__streamOutBuff.push(packet)
+            self.sendFrameSignal.emit(packet)
 
         self.__sendFrameID += 1
 
@@ -159,6 +204,7 @@ class VideoStreamer:
         """
         frameSequence : int = 0
         cap : cv2.VideoCapture
+        lastFrameTime : float = 0.0
 
         try:
             cap = cv2.VideoCapture(self.__srcFile)
@@ -172,7 +218,9 @@ class VideoStreamer:
                 cap.release()
                 try:
                     cap = cv2.VideoCapture(self.__srcFile)  # Restart the stream
-                except:
+                except Exception as e:
+                    logging.error("Failed to restart video capture: %s", e)
+                    self.__streamOutCanRun = False
                     return
                 continue
 
@@ -184,6 +232,14 @@ class VideoStreamer:
 
             # Get the size of the encoded data
             size = len(data)
+            
+            # Lets try and limit the frame rate to 10 FPS
+            currentTime = time.time()
+            if currentTime - lastFrameTime < 0.1:
+                time.sleep(0.01)
+                continue
+
+            lastFrameTime = currentTime
 
             # Send frame
             self.__sendFrame(data)
@@ -194,10 +250,13 @@ class VideoStreamer:
 
     def __streamThread(self) -> None:
         while True:
-            data: bytes = self.__streamSocket.receive_data(65507)
-            if data is None:
+            # data: bytes = self.__streamSocket.receive_data(65507)
+            # if data is None:
+            #     continue
+            while self.__streamInBuff.empty():
                 continue
 
+            data = self.__streamInBuff.read()
             frameSeg = Frame.from_buffer_copy(data)
             seqID      = frameSeg.metadata.sequenceID
             segID      = frameSeg.metadata.segmentID
@@ -244,10 +303,34 @@ class VideoStreamer:
                 npbuf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                 frame = cv2.imdecode(npbuf, cv2.IMREAD_COLOR)
 
+                # Compute and overlay receive FPS
+                now = time.time()
+                fps_text = ""  # default when unknown
+                if self.__lastRecvFrameTime is not None:
+                    delta = now - self.__lastRecvFrameTime
+                    if delta > 0:
+                        fps_val = 1.0 / delta
+                        fps_text = f"FPS: {fps_val:.1f}"
+                self.__lastRecvFrameTime = now
+
+                if fps_text:
+                    cv2.putText(
+                        frame,
+                        fps_text,
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
                 self.__segmentMap.clear()
                 self.__recvFrameID = None
+                
+                rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                self.__frameBuffer.push(frame)
+                self.__frameBuffer.push(rgbImage)
 
 
     def __imShowThread(self):
@@ -275,9 +358,6 @@ class VideoStreamer:
 
             # Overlay FPS on the frame
             cv2.putText(frame, f"FPS: {fps_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.imshow("RC Car Stream", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
 
         # self.__cap.release()
         cv2.destroyAllWindows()

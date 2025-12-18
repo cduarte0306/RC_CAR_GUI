@@ -5,8 +5,13 @@ import os
 import configparser
 from datetime import datetime
 import signal
+import sys
 
 from utils.utilities import Emitter, Signal
+from ui.MainWindow import MainWindow
+from ui.theme import apply_app_theme
+
+from PyQt6.QtWidgets import QApplication
 
 
 def init_logger() -> configparser.ConfigParser:
@@ -51,10 +56,17 @@ if __name__ == "__main__":
         parser["version"]["PATCH"]
     )
 
-    streamer = VideoStreamer(parser["settings"]["video_path"])
-    ds = Controller()
+    # streamer = VideoStreamer(parser["settings"]["video_path"])
+    # ds = Controller()
 
     # ds.deviceFound.connect(lambda ip: streamer.startStream(ip))
-    ds.deviceFound.connect(lambda ip: streamer.startStream(ip))
-    ds.trianglePressed.connect(lambda state: streamer.startStreamOut(state))
+    # ds.deviceFound.connect(lambda ip: streamer.startStream(ip))
+    # ds.trianglePressed.connect(lambda state: streamer.startStreamOut(state))
     # ds.trianglePressed.connect(lambda state: pass)
+    
+    app = QApplication(sys.argv)
+    apply_app_theme(app)
+
+    window = MainWindow()
+    window.show()
+    app.exec()
