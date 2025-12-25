@@ -26,6 +26,7 @@ class BackendIface(QThread):
     videoModeRequested = pyqtSignal(str)  # Emits requested camera mode (regular/depth)
     telemetryReceived  = pyqtSignal(bytes)  # Telemetry data received
     videoUploadProgress = pyqtSignal(int, int)  # Emitted during video file upload (sent bytes, total bytes)
+    videoUploadFinished = pyqtSignal()  # Emitted when video upload is finished
     commandReplyReceived = pyqtSignal(bytes)  # Replies from command/ctrl socket
 
     CONTROLLER_PORT = 65000
@@ -182,6 +183,7 @@ class BackendIface(QThread):
         Video transmission ended
         """
         logging.info("Video transmission ended")
+        self.videoUploadFinished.emit()
 
 
     def startStreamOut(self, state : bool, fileName:str) -> None:

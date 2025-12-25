@@ -466,6 +466,7 @@ class MainWindow(QMainWindow):
         self.__consumer.videoBufferSignal.connect(lambda frame : self.__streamWindow.updateFrame(frame))
         self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
         self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
+        self.__consumer.videoUploadFinished.connect(self.__streamWindow.finishUploadProgress)
         
         self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__consumer.setStreamMode(state))
         self.__streamWindow.viewModeChanged.connect(self.__consumer.setVideoMode)

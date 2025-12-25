@@ -241,6 +241,7 @@ class VideoStreamingWindow(QWidget):
             logging.info("No valid .MOV file selected for upload")
             return
 
+        self.__uploadVideo.setEnabled(False)
         self.__settings.setValue("lastFilePath", text)
         logging.info(f"Uploading video file: {text}")
         self.__showUploadProgress()
@@ -353,6 +354,32 @@ class VideoStreamingWindow(QWidget):
             dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
             dlg.setMinimumWidth(360)
             dlg.setMinimumDuration(0)
+            dlg.setStyleSheet(
+                """
+                QProgressDialog {
+                    background-color: #0f1624;
+                    color: #e8ecf3;
+                    border: 1px solid rgba(0,210,255,0.35);
+                    border-radius: 10px;
+                }
+                QProgressDialog QLabel {
+                    color: #e8ecf3;
+                    font-weight: 600;
+                }
+                QProgressBar {
+                    background-color: rgba(255,255,255,0.08);
+                    border: 1px solid rgba(255,255,255,0.18);
+                    border-radius: 8px;
+                    text-align: center;
+                    color: #e8ecf3;
+                    padding: 3px;
+                }
+                QProgressBar::chunk {
+                    background-color: #00d2ff;
+                    border-radius: 8px;
+                }
+                """
+            )
             dlg.show()
             self.__uploadProgress = dlg
         else:
@@ -371,6 +398,7 @@ class VideoStreamingWindow(QWidget):
 
 
     def finishUploadProgress(self, success: bool = True) -> None:
+        self.__uploadVideo.setEnabled(True)
         if self.__uploadProgress is None:
             return
         self.__uploadProgress.reset()

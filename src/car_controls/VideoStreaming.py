@@ -215,6 +215,7 @@ class VideoStreamer:
         cap : cv2.VideoCapture
         fileSize: int = os.path.getsize(self.__srcFile)
         bytes_sent: int = 0
+        total_estimate: int = fileSize  # start with file size; grow if compressed frames exceed it
         try:
             cap = cv2.VideoCapture(self.__srcFile)
         except Exception as e:
@@ -239,9 +240,13 @@ class VideoStreamer:
             # Send frame immediately (no FPS cap)
             self.__sendFrame(data)
             bytes_sent += size
-            # Emit cumulative progress (sent so far, total file size)
-            self.frameSentSignal.emit(bytes_sent, fileSize)
-
+            total_estimate = max(total_estimate, bytes_sent)
+            # Emit cumulative progress (sent so far, current total estimate)
+            self.frameSentSignal.emit(bytes_sent, total_estimate)
+        # Final emission to ensure UI hits 100%
+        final_total = max(total_estimate, bytes_sent, fileSize)
+        self.frameSentSignal.emit(final_total, total_estimate)
+        logging.info("Upload bytes sent=%d, file_size=%d, total_estimate=%d", bytes_sent, fileSize, total_estimate)
         # Fire ending signal
         self.endingVideoTransmission.emit()
         cap.release()
