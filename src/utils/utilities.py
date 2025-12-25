@@ -111,7 +111,7 @@ class CircularBuffer:
 class Signal:
     """A simple custom signal implementation."""
 
-    def __init__(self):
+    def __init__(self, *arg_types):
         self._callbacks = []
 
 

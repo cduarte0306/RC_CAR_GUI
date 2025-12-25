@@ -446,10 +446,8 @@ class MainWindow(QMainWindow):
         
         # Connect signals
         self.__connectSignals()
-        
         self.__consumer.start()
 
-        
 
     def __connectSignals(self):
         """
@@ -466,10 +464,25 @@ class MainWindow(QMainWindow):
         self.__consumer.deviceMacResolved.connect(self.__onDeviceMacResolved)
         
         self.__consumer.videoBufferSignal.connect(lambda frame : self.__streamWindow.updateFrame(frame))
+        self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
+        self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
         
-        self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__startStreamOut(state, fileName))
+        self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__consumer.setStreamMode(state))
         self.__streamWindow.viewModeChanged.connect(self.__consumer.setVideoMode)
+        self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+
+
+    def __updateVideoUploadProgress(self, sent: int, total: int) -> None:
+        """
+        Update video upload progress bar in the streaming window
+
+        Args:
+            sent (int): _sent bytes
+            total (int): _total bytes
+        """
+        print("Hello")
+        self.__streamWindow.updateUploadProgress(sent, total)
 
 
     def __onDeviceDiscovered(self, ip: str) -> None:
@@ -508,10 +521,17 @@ class MainWindow(QMainWindow):
             self.__statusChip.setToolTip(f"MAC address: {mac}")
 
 
+    def __updateVideoUploadProgress(self, sent: int, total: int) -> None:
+        if total <= 0:
+            return
+        percent = int((sent / total) * 100)
+        self.__streamWindow.updateUploadProgress(percent)
+        if sent >= total:
+            self.__streamWindow.finishUploadProgress(True)
+
+
     def __startStreamOut(self, state : bool, fileName : str) -> None:
-        self.__consumer.startStreamOut(state, fileName)
-
-
+        self.__consumer.setStreamMode(state)
 
 
     def __onDiscoveryStart(self) -> None:
@@ -521,12 +541,10 @@ class MainWindow(QMainWindow):
         self.__consumer.startDiscovery()
 
 
-
     def __setContent(self, widget: QWidget) -> None:
         """Swap the central card contents with the requested widget."""
         self.__clearLayout(self.__contentLayout)
         self.__contentLayout.addWidget(widget)
-
 
 
     def __setStatusChip(self, text: str, state: str) -> None:

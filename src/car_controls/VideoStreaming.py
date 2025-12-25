@@ -7,6 +7,7 @@ from utils.utilities import CircularBuffer
 import configparser
 import numpy as np
 import time
+import os
 import ctypes
 
 from utils.utilities import Signal
@@ -36,6 +37,10 @@ class Frame(ctypes.Structure):
     
 class VideoStreamer:
     PORT = 5000
+    
+    frameSentSignal = Signal(int, int)    # Emitted when a frame is sent out
+    startingVideoTransmission = Signal()  # Emitted when video transmission is starting
+    endingVideoTransmission   = Signal()  # Emitted when video transmission is ending
 
     def __init__(self, streamInAdapter : UDP = None, streamOutAdapter : UDP = None, path:str = ""):
         self.__cap = None
@@ -203,9 +208,13 @@ class VideoStreamer:
         Handles transmitting of frames over network
         """
         frameSequence : int = 0
-        cap : cv2.VideoCapture
-        lastFrameTime : float = 0.0
+        
+        # Fire starting signal
+        self.startingVideoTransmission.emit()
 
+        cap : cv2.VideoCapture
+        fileSize: int = os.path.getsize(self.__srcFile)
+        bytes_sent: int = 0
         try:
             cap = cv2.VideoCapture(self.__srcFile)
         except Exception as e:
@@ -216,13 +225,7 @@ class VideoStreamer:
             ret, frame = cap.read()
             if not ret:
                 cap.release()
-                try:
-                    cap = cv2.VideoCapture(self.__srcFile)  # Restart the stream
-                except Exception as e:
-                    logging.error("Failed to restart video capture: %s", e)
-                    self.__streamOutCanRun = False
-                    return
-                continue
+                break
 
             # Transmit the frame to the RC car
             # Encode frame as JPEG to reduce size significantly
@@ -232,18 +235,15 @@ class VideoStreamer:
 
             # Get the size of the encoded data
             size = len(data)
-            
-            # Lets try and limit the frame rate to 10 FPS
-            currentTime = time.time()
-            if currentTime - lastFrameTime < 0.1:
-                time.sleep(0.01)
-                continue
 
-            lastFrameTime = currentTime
-
-            # Send frame
+            # Send frame immediately (no FPS cap)
             self.__sendFrame(data)
+            bytes_sent += size
+            # Emit cumulative progress (sent so far, total file size)
+            self.frameSentSignal.emit(bytes_sent, fileSize)
 
+        # Fire ending signal
+        self.endingVideoTransmission.emit()
         cap.release()
         del cap
 
@@ -254,6 +254,7 @@ class VideoStreamer:
             # if data is None:
             #     continue
             while self.__streamInBuff.empty():
+                time.sleep(0.0001)
                 continue
 
             data = self.__streamInBuff.read()

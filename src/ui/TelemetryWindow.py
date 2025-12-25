@@ -9,6 +9,7 @@ from PyQt6.QtGui import QIcon, QPainter, QColor, QPixmap, QPen, QFont
 from ui.theme import make_card
 
 import math
+import json
 
 
 class ProximityVisualizer(QWidget):
@@ -278,10 +279,12 @@ class GyroVisualizer(QWidget):
 
         self._smoothing = 0.12
 
+
     def setGyro(self, roll, pitch, yaw):
         self._troll = float(roll)
         self._tpitch = float(pitch)
         self._tyaw = float(yaw)
+
 
     def _step(self):
         self._roll += (self._troll - self._roll) * self._smoothing
@@ -290,6 +293,7 @@ class GyroVisualizer(QWidget):
         dy = (self._tyaw - self._yaw + 180) % 360 - 180
         self._yaw = (self._yaw + dy * self._smoothing) % 360
         self.update()
+
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -603,6 +607,43 @@ class VehicleTelemetryWindow(QWidget):
 
         mapTab.setLayout(mapLayout)
         self.tabs.addTab(mapTab, "Trajectory")
+
+
+    def updateTelemetry(self, raw_payload):
+        """Decode telemetry bytes/str into UI elements."""
+        try:
+            text = raw_payload.decode("utf-8") if isinstance(raw_payload, (bytes, bytearray)) else str(raw_payload)
+            outer = json.loads(text)
+            payload_str = outer.get("payload", text)
+            data = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+        except Exception:
+            return
+
+        try:
+            front = float(data.get("frontDistance", self.proximity.front_dist))
+            left = float(data.get("leftDistance", self.proximity.left_dist))
+            right = float(data.get("rightDistance", self.proximity.right_dist))
+            back = float(data.get("backDistance", self.proximity.back_dist if hasattr(self.proximity, "back_dist") else front))
+            self.proximity.setDistances(front, back, left, right)
+        except Exception:
+            pass
+
+        try:
+            spd = float(data.get("speed", 0.0))
+            self.speedLabel.setText(f"{spd:.0f} km/h")
+            if hasattr(self, "odometer"):
+                self.odometer.animateTo(int(spd))
+        except Exception:
+            pass
+
+        try:
+            vb = data.get("version_build")
+            vmaj = data.get("version_major")
+            vmin = data.get("version_minor")
+            if vb is not None and vmaj is not None and vmin is not None:
+                self.info_label.setText(f"Telemetry v{vmaj}.{vmin}.{vb}")
+        except Exception:
+            pass
 
     def setTraversalPose(self, x: float, y: float, heading_deg: float = 0.0):
         """Update trajectory plot with an absolute pose."""

@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit, QButtonGroup
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit, QButtonGroup, QProgressDialog
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon
 from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings
 import numpy as np
@@ -65,8 +65,9 @@ class IconButton(QPushButton):
 
 class VideoStreamingWindow(QWidget):
 
-    startStreamOut = pyqtSignal(bool, str)  # File selected signals
-    viewModeChanged = pyqtSignal(str)       # "regular" or "depth"
+    startStreamOut     = pyqtSignal(bool, str) # File selected signals
+    viewModeChanged    = pyqtSignal(str)       # "regular" or "depth"
+    uploadVideoClicked = pyqtSignal(str)       # File selected signal
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,6 +146,7 @@ class VideoStreamingWindow(QWidget):
         self.layout().addLayout(videoOutcontrolerLayout)
 
         # Put FPS overlay in top-left corner
+        self.__uploadVideo       = QPushButton("Upload Video")
         self.__fileLineEdit      = QLineEdit()
         self.__fileLineEdit.setPlaceholderText("Select a .mov file to stream out")
         last_path = self.__settings.value("lastFilePath", "", str)
@@ -189,6 +191,22 @@ class VideoStreamingWindow(QWidget):
         # overlay.addWidget(self.__fileLineEdit, alignment=Qt.AlignmentFlag.AlignLeft)
         overlay.addStretch()
         overlay.addWidget(self.__fileLineEdit, stretch=1)
+        self.__uploadVideo.setFixedHeight(36)
+        self.__uploadVideo.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0,210,255,0.16);
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.35);
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.24);
+            }
+        """)
+        overlay.addWidget(self.__uploadVideo)
         overlay.addWidget(self.__browseButton)
         self.layout().addLayout(overlay)
         
@@ -196,6 +214,7 @@ class VideoStreamingWindow(QWidget):
         
         # Icon playig flag
         self.__isPlaying = False
+        self.__uploadProgress = None
 
         # FPS tracking
         self.__fpsSmooth = 0.0
@@ -210,8 +229,23 @@ class VideoStreamingWindow(QWidget):
         # Connect signals
         self.__browseButton.clicked.connect(self.__openFileDialog)
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
+        self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
+        
         # Default view mode
         self.__setViewMode(self.__viewMode, emit_signal=False)
+    
+    
+    def __uploadVideoClicked(self) -> None:
+        text = self.__fileLineEdit.text()
+        if text == "" or not os.path.isfile(text) or not text.lower().endswith(".mov"):
+            logging.info("No valid .MOV file selected for upload")
+            return
+
+        self.__settings.setValue("lastFilePath", text)
+        logging.info(f"Uploading video file: {text}")
+        self.__showUploadProgress()
+        self.uploadVideoClicked.emit(text)
+        # TODO: wire real upload and call updateUploadProgress()/finishUploadProgress()
         
         
     def __startStreamOut(self) -> None:
@@ -309,4 +343,36 @@ class VideoStreamingWindow(QWidget):
             btn.setChecked(key == mode)
         if emit_signal:
             self.viewModeChanged.emit(mode)
+
+
+    def __showUploadProgress(self):
+        if self.__uploadProgress is None:
+            dlg = QProgressDialog("Uploading video...", None, 0, 0, self)
+            dlg.setWindowTitle("Upload")
+            dlg.setCancelButton(None)
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dlg.setMinimumWidth(360)
+            dlg.setMinimumDuration(0)
+            dlg.show()
+            self.__uploadProgress = dlg
+        else:
+            self.__uploadProgress.setLabelText("Uploading video...")
+            self.__uploadProgress.setRange(0, 0)
+            self.__uploadProgress.show()
+
+
+    def updateUploadProgress(self, percent: int) -> None:
+        """Call this from backend when bytes uploaded are known."""
+        if self.__uploadProgress is None:
+            return
+        clamped = max(0, min(100, int(percent)))
+        self.__uploadProgress.setRange(0, 100)
+        self.__uploadProgress.setValue(clamped)
+
+
+    def finishUploadProgress(self, success: bool = True) -> None:
+        if self.__uploadProgress is None:
+            return
+        self.__uploadProgress.reset()
+        self.__uploadProgress = None
 
