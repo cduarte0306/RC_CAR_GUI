@@ -1,3 +1,4 @@
 pydualsense
 zeroconf
 opencv-python
+PyQt6

@@ -5,10 +5,13 @@
             "name": "Run src/run.py",
             "type": "python",
             "request": "launch",
+            "qt": "auto",
             "program": "${workspaceFolder}/src/run.py",
             "console": "integratedTerminal",
             "args": [],
-            "cwd": "${workspaceFolder}/src"
+            "cwd": "${workspaceFolder}/src",
+            "justMyCode": false,
+            "subProcess": true
         }
     ]
 }
