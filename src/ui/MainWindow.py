@@ -1,12 +1,12 @@
 from PyQt6.QtCore import (
-    QSize, QPropertyAnimation, QRect, QRectF, QEasingCurve, Qt, QTimer, pyqtSignal
+    QSize, QPropertyAnimation, QRect, QRectF, QEasingCurve, Qt, QTimer, pyqtSignal, QPoint
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QGraphicsOpacityEffect,
     QLabel, QFrame, QGraphicsBlurEffect, QHBoxLayout, QFileDialog, QMessageBox, QGridLayout,
-    QSizePolicy
+    QSizePolicy, QToolTip
 )
-from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen
+from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen, QCursor
 
 from ui.TelemetryWindow import VehicleTelemetryWindow
 from ui.VideoStreamingWindow import VideoStreamingWindow
@@ -671,12 +671,15 @@ class MainWindow(QMainWindow):
             total (int): _total bytes
         """
         self.__streamWindow.updateUploadProgress(sent, total)
-        
+
 
     def __onControllerConnected(self, connType: str) -> None:
         """Handle controller connection events."""
         self.__batteryIndicator.setVisible(True)
-        self.__batteryIndicator.setToolTip(f"Controller connected via {connType}")
+        tooltip_text = f"Controller connected via {connType}"
+        self.__batteryIndicator.setToolTip(tooltip_text)
+        anchor = self.__batteryIndicator.mapToGlobal(self.__batteryIndicator.rect().bottomRight())
+        QToolTip.showText(anchor + QPoint(6, 6), tooltip_text, self.__batteryIndicator)
 
 
     def __onControllerBatteryLevel(self, level: int) -> None:
