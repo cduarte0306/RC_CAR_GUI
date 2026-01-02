@@ -1,17 +1,19 @@
 from PyQt6.QtCore import (
-    QSize, QPropertyAnimation, QRect, QEasingCurve, Qt, QTimer, pyqtSignal
+    QSize, QPropertyAnimation, QRect, QRectF, QEasingCurve, Qt, QTimer, pyqtSignal
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QGraphicsOpacityEffect,
-    QLabel, QFrame, QGraphicsBlurEffect, QHBoxLayout
+    QLabel, QFrame, QGraphicsBlurEffect, QHBoxLayout, QFileDialog, QMessageBox, QGridLayout,
+    QSizePolicy
 )
-from PyQt6.QtGui import QIcon, QFont, QPixmap
+from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen
 
 from ui.TelemetryWindow import VehicleTelemetryWindow
 from ui.VideoStreamingWindow import VideoStreamingWindow
 from ui.UIConsumer import BackendIface
 from ui.FirmwareUpdateWindow import FirmwareUpdateWindow
 from ui.theme import make_card
+import logging
 
 
 class GlowButton(QPushButton):
@@ -72,7 +74,7 @@ class SidePanel(QFrame):
 
         # Auto-hide timer
         self.autoHideTimer = QTimer()
-        self.autoHideTimer.setInterval(2000)  # 2s after no mouse → hide
+        self.autoHideTimer.setInterval(400)  # 0.4s after no mouse → hide
         self.autoHideTimer.timeout.connect(self.__autoHideCheck)
 
         self.hidden = True
@@ -209,7 +211,7 @@ class SidePanel(QFrame):
         if not self.underMouse():
             self.slideOut()
             self.autoHideTimer.stop()
-            
+
             
 class ClickableLabel(QLabel):
     """A QLabel that behaves like a transparent icon button (clickable)."""
@@ -243,33 +245,39 @@ class WelcomeWindow(QWidget):
 
     def __init__(self, parent=None, flags=Qt.WindowType.Widget):
         super().__init__(parent, flags)
+        self.setObjectName("welcome-panel")
 
         # Make panel look premium
         self.setStyleSheet("""
-            QWidget {
-                background-color: rgba(12, 17, 23, 210);
-                border-radius: 18px;
-                border: 1px solid rgba(255,255,255,0.08);
+            QWidget#welcome-panel {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(18, 24, 34, 235),
+                    stop:1 rgba(11, 16, 24, 230));
+                border-radius: 20px;
+                border: 1px solid rgba(255,255,255,0.10);
             }
             QLabel {
                 color: #e8ecf3;
                 background: transparent;
+                border: none;
             }
             QLabel#title {
                 color: #e8ecf3;
                 font-weight: 700;
+                letter-spacing: 1px;
+                text-transform: uppercase;
             }
             QPushButton {
                 background-color: #00d2ff;
                 color: #0a1116;
-                border-radius: 12px;
-                padding: 12px 22px;
+                border-radius: 14px;
+                padding: 13px 26px;
                 font-size: 16px;
                 font-weight: 700;
                 border: none;
             }
             QPushButton:hover {
-                background-color: #24dcff;
+                background-color: #26deff;
             }
         """)
 
@@ -344,7 +352,7 @@ class WelcomeWindow(QWidget):
         self._fadeAnim.start()
 
 
-    def addDevice(self, ip: str, icon_path: str, connect_callback=None):
+    def addDevice(self, icon_path: str, deviceTooltip: str = "", connect_callback=None):
         """Add a discovered device icon to the welcome panel.
 
         - `ip` is the device IP shown on hover
@@ -354,7 +362,7 @@ class WelcomeWindow(QWidget):
         # Avoid duplicates
         for i in range(self._devices_layout.count()):
             w = self._devices_layout.itemAt(i).widget()
-            if w and getattr(w, "_device_ip", None) == ip:
+            if w and getattr(w, "deviceTooltip", None) == deviceTooltip:
                 return
 
         # Use a ClickableLabel to avoid button chrome and background artifacts
@@ -363,11 +371,110 @@ class WelcomeWindow(QWidget):
         except Exception:
             icon = QPixmap()
 
-        lbl = ClickableLabel(icon, tooltip=f"{ip}\nClick to connect", callback=connect_callback)
-        lbl._device_ip = ip
+        lbl = ClickableLabel(icon, tooltip=f"{deviceTooltip}\nClick to connect", callback=connect_callback)
+        lbl._deviceTooltip = deviceTooltip
         lbl.setFixedSize(72, 72)
         lbl.setScaledContents(True)
         self._devices_layout.addWidget(lbl)
+
+
+class BatteryIndicator(QWidget):
+    """Compact controller + battery icon with percentage text."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = -1
+        self._controller_icon = QIcon("icons/dualsense.svg")
+        self.setFixedHeight(35)
+        self.setMinimumWidth(120)
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.setToolTip("Controller battery")
+
+    def setLevel(self, level: int | None) -> None:
+        if level is None:
+            level_int = -1
+        else:
+            try:
+                level_int = max(0, min(100, int(level)))
+            except Exception:
+                level_int = -1
+
+        if level_int != self._level:
+            self._level = level_int
+            self.update()
+
+    def _level_color(self) -> QColor:
+        if self._level < 0:
+            return QColor(155, 167, 180)
+        if self._level <= 20:
+            return QColor(231, 76, 60)
+        if self._level <= 50:
+            return QColor(255, 200, 87)
+        return QColor(54, 224, 184)
+
+    def paintEvent(self, event):  # noqa: N802
+        _ = event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self.rect()
+        padding = 4
+        icon_w = 24
+        icon_h = 10
+        cap_w = 3
+        cap_h = 6
+        y = (rect.height() - icon_h) / 2
+
+        border_rect = rect.adjusted(0, 0, -1, -1)
+        painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+        painter.setBrush(QColor(255, 255, 255, 10))
+        painter.drawRoundedRect(border_rect, 8, 8)
+
+        controller_size = 30
+        controller_x = padding + 2
+        controller_y = (rect.height() - controller_size) / 2
+        controller_pix = self._controller_icon.pixmap(controller_size, controller_size)
+        if not controller_pix.isNull():
+            tinted = QPixmap(controller_pix.size())
+            tinted.fill(Qt.GlobalColor.transparent)
+            tint_painter = QPainter(tinted)
+            tint_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            tint_painter.drawPixmap(0, 0, controller_pix)
+            tint_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            tint_painter.fillRect(tinted.rect(), QColor(155, 167, 180))
+            tint_painter.end()
+            painter.drawPixmap(int(controller_x), int(controller_y), tinted)
+
+        battery_x = controller_x + controller_size + 8
+        body = QRectF(battery_x, y, icon_w, icon_h)
+        cap = QRectF(battery_x + icon_w, y + (icon_h - cap_h) / 2, cap_w, cap_h)
+
+        outline = QColor(255, 255, 255, 120)
+        painter.setPen(QPen(outline, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(body, 2.5, 2.5)
+        painter.drawRoundedRect(cap, 1.5, 1.5)
+
+        if self._level >= 0:
+            inset = 2
+            fill_w = max(2, (icon_w - inset * 2) * (self._level / 100))
+            fill_rect = QRectF(
+                battery_x + inset,
+                y + inset,
+                fill_w,
+                icon_h - inset * 2,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._level_color())
+            painter.drawRoundedRect(fill_rect, 2, 2)
+
+        text = "--%" if self._level < 0 else f"{self._level}%"
+        painter.setPen(QColor(232, 236, 243))
+        font = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        text_x = battery_x + icon_w + cap_w + 6
+        text_rect = QRectF(text_x, 0, rect.width() - text_x, rect.height())
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
 
 
 class MainWindow(QMainWindow):
@@ -387,21 +494,43 @@ class MainWindow(QMainWindow):
         centralLayout.setContentsMargins(24, 24, 24, 24)
         centralLayout.setSpacing(14)
 
-        headerRow = QHBoxLayout()
-        headerRow.setSpacing(10)
+        headerRow = QGridLayout()
+        headerRow.setHorizontalSpacing(10)
+        headerRow.setColumnStretch(0, 1)
+        headerRow.setColumnStretch(1, 0)
+        headerRow.setColumnStretch(2, 1)
+        headerRow.setContentsMargins(0, 0, 0, 0)
 
         self.__titleLabel = QLabel("RC Control Studio")
         self.__titleLabel.setObjectName("header-title")
+        self.__titleLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.__statusChip = QLabel("Idle")
         self.__statusChip.setObjectName("status-chip")
         self.__statusChip.setProperty("state", "idle")
-        self.__statusChip.setWordWrap(True)
+        self.__statusChip.setWordWrap(False)
+        self.__statusChip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.__statusChip.setFixedHeight(36)
+        self.__statusChip.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.__setStatusChip("Idle", "idle")
 
-        headerRow.addWidget(self.__titleLabel)
-        headerRow.addStretch()
-        headerRow.addWidget(self.__statusChip)
+        self.__batteryIndicator = BatteryIndicator(self)
+        self.__batteryIndicator.setVisible(False)
+
+        chipWrap = QWidget()
+        chipLayout = QHBoxLayout(chipWrap)
+        chipLayout.setContentsMargins(0, 0, 0, 0)
+        chipLayout.setSpacing(8)
+        chipLayout.addWidget(self.__statusChip)
+        chipLayout.addWidget(self.__batteryIndicator)
+
+        headerRow.addWidget(self.__titleLabel, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        headerRow.addWidget(
+            chipWrap,
+            0,
+            2,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
 
         self.contentFrame = QFrame()
         make_card(self.contentFrame)
@@ -415,6 +544,8 @@ class MainWindow(QMainWindow):
 
         centralLayout.addLayout(headerRow)
         centralLayout.addWidget(self.contentFrame)
+        centralLayout.setStretch(0, 0)
+        centralLayout.setStretch(1, 1)
         self.central.setLayout(centralLayout)
         self.setCentralWidget(self.central)
         
@@ -463,15 +594,72 @@ class MainWindow(QMainWindow):
         self.__consumer.deviceConnected.connect(self.__onDeviceConnected)
         self.__consumer.deviceMacResolved.connect(self.__onDeviceMacResolved)
         
-        self.__consumer.videoBufferSignal.connect(lambda frame : self.__streamWindow.updateFrame(frame))
+        self.__consumer.videoBufferSignal.connect(lambda left_frame, right_frame: self.__streamWindow.updateFrame(left_frame))
+        self.__consumer.videoBufferSignalStereo.connect(lambda left_frame, right_frame: self.__streamWindow.updateStereoFrame(left_frame, right_frame))
         self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
         self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
         self.__consumer.videoUploadFinished.connect(self.__streamWindow.finishUploadProgress)
+        self.__consumer.notifyDisconnect.connect(self.__handleDisconnect)
+        self.__consumer.controllerConnected.connect(self.__onControllerConnected)
+        self.__consumer.controllerBatteryLevel.connect(self.__onControllerBatteryLevel)
+        self.__consumer.controllerDisconnected.connect(self.__onControllerDisconnected)
         
         self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__consumer.setStreamMode(state))
         self.__streamWindow.viewModeChanged.connect(self.__consumer.setVideoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+
+
+    def __handleDisconnect(self) -> None:
+        """
+        Handle device disconnection
+        """
+        self.side.btnTelem.setEnabled(False)
+        self.side.btnVideo.setEnabled(False)
+        self.side.btnFw.setEnabled(False)
+        self.side.btnGPS.setEnabled(False)
+        self.__setStatusChip("Disconnected", "idle")
+        self.__batteryIndicator.setLevel(None)
+        self.__disconnectWindowShow()
+        self.__showWelcome()
+
+
+    def __disconnectWindowShow(self) -> None:
+        try:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Device Disconnected")
+            msg.setText("Connection to the RC car was lost. Check power/network and reconnect.")
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.setStyleSheet(
+                """
+                QMessageBox {
+                    background-color: #0b111c;
+                    color: #e8ecf3;
+                    border: 1px solid rgba(0,210,255,0.35);
+                    border-radius: 10px;
+                    padding: 12px;
+                }
+                QMessageBox QLabel {
+                    color: #e8ecf3;
+                    font-size: 14px;
+                }
+                QMessageBox QPushButton {
+                    background-color: rgba(0,210,255,0.16);
+                    color: #e8ecf3;
+                    border: 1px solid rgba(0,210,255,0.35);
+                    border-radius: 8px;
+                    padding: 6px 14px;
+                    min-width: 80px;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: rgba(0,210,255,0.24);
+                }
+                """
+            )
+            msg.exec()
+        except Exception:
+            pass
 
 
     def __updateVideoUploadProgress(self, sent: int, total: int) -> None:
@@ -482,15 +670,33 @@ class MainWindow(QMainWindow):
             sent (int): _sent bytes
             total (int): _total bytes
         """
-        print("Hello")
         self.__streamWindow.updateUploadProgress(sent, total)
+        
+
+    def __onControllerConnected(self, connType: str) -> None:
+        """Handle controller connection events."""
+        self.__batteryIndicator.setVisible(True)
+        self.__batteryIndicator.setToolTip(f"Controller connected via {connType}")
+
+
+    def __onControllerBatteryLevel(self, level: int) -> None:
+        """Update controller battery level in the header."""
+        if not self.__batteryIndicator.isVisible():
+            self.__batteryIndicator.setVisible(True)
+        self.__batteryIndicator.setLevel(level)
+
+
+    def __onControllerDisconnected(self) -> None:
+        """Hide controller battery indicator when connection is lost."""
+        self.__batteryIndicator.setLevel(None)
+        self.__batteryIndicator.setVisible(False)
 
 
     def __onDeviceDiscovered(self, ip: str) -> None:
         """Add a discovered device to the welcome window with hover tooltip and click-to-connect."""
         # Use a car icon from icons/ folder
         icon_path = "icons/rc-car.png"
-        self.__welcomeWindow.addDevice(ip, icon_path, connect_callback=lambda: self.__consumer.connectToDevice(ip))
+        self.__welcomeWindow.addDevice(icon_path, ip, connect_callback=lambda: self.__consumer.connectToDevice(ip))
         self.__setStatusChip("Discovering devices", "discovering")
         self.__welcomeWindow.setStartButtonState(False)
 

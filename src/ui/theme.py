@@ -19,25 +19,41 @@ QMainWindow {{
 }}
 
 QWidget#content-card, QFrame#content-card {{
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 16px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.06),
+        stop:1 rgba(255, 255, 255, 0.02));
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 18px;
 }}
 
 #header-title {{
     font-size: 22px;
     font-weight: 700;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.6px;
 }}
 
 #status-chip {{
-    padding: 6px 10px;
-    border-radius: 10px;
+    padding: 0 6px;
+    border-radius: 7px;
     font-weight: 600;
-    font-size: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 9px;
+    line-height: 9px;
+    height: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
     color: {TEXT_PRIMARY};
     background: rgba(255, 255, 255, 0.06);
+}}
+
+#battery-chip {{
+    padding: 0 6px;
+    border-radius: 7px;
+    font-weight: 600;
+    font-size: 9px;
+    line-height: 9px;
+    height: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: {TEXT_MUTED};
+    background: rgba(255, 255, 255, 0.04);
 }}
 
 #status-chip[state="discovering"] {{
@@ -59,7 +75,7 @@ QWidget#content-card, QFrame#content-card {{
 #card-title {{
     font-size: 18px;
     font-weight: 650;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.4px;
 }}
 
 QLabel#muted {{
@@ -67,8 +83,10 @@ QLabel#muted {{
 }}
 
 QPushButton {{
-    background-color: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.09),
+        stop:1 rgba(255, 255, 255, 0.04));
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 10px;
     padding: 10px 14px;
     color: {TEXT_PRIMARY};
@@ -76,12 +94,12 @@ QPushButton {{
 }}
 
 QPushButton:hover {{
-    background-color: rgba(0, 210, 255, 0.16);
-    border-color: rgba(0, 210, 255, 0.45);
+    background-color: rgba(0, 210, 255, 0.18);
+    border-color: rgba(0, 210, 255, 0.5);
 }}
 
 QPushButton:pressed {{
-    background-color: rgba(0, 210, 255, 0.24);
+    background-color: rgba(0, 210, 255, 0.26);
 }}
 
 QLineEdit, QTextEdit {{

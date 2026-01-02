@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QPainter, QColor, QPixmap, QPen, QFont
 from ui.theme import make_card
-
 import math
 import json
 
@@ -18,7 +17,6 @@ class ProximityVisualizer(QWidget):
 
         # distances in cm — set these from your sensor data
         self.front_dist = 100
-        self.back_dist = 100
         self.left_dist = 100
         self.right_dist = 100
 
@@ -29,9 +27,8 @@ class ProximityVisualizer(QWidget):
         self.setMinimumSize(350, 350)
 
 
-    def setDistances(self, front, back, left, right):
+    def setDistances(self, front, left, right):
         self.front_dist = front
-        self.back_dist = back
         self.left_dist = left
         self.right_dist = right
         self.update()
@@ -55,7 +52,7 @@ class ProximityVisualizer(QWidget):
 
         # scale arc length
         length = max(0, min(dist, self.max_dist))
-        arc_radius = 60 + (self.max_dist - length)  # shorter distance = closer arc
+        arc_radius = 60 + length  # closer obstacle = smaller arc hugging the car
 
         # arc sector shape
         arc_rect = QRectF(cx - arc_radius, cy - arc_radius,
@@ -100,9 +97,6 @@ class ProximityVisualizer(QWidget):
         # front sensor arc (angle_deg=90)
         self.drawArc(p, cx, car_rect.top(), angle_deg=90, dist=self.front_dist)
 
-        # back arc (angle_deg=-90)
-        self.drawArc(p, cx, car_rect.bottom(), angle_deg=-90, dist=self.back_dist)
-
         # left side arc (angle_deg=180)
         self.drawArc(p, car_rect.left(), cy, angle_deg=180, dist=self.left_dist)
 
@@ -127,16 +121,18 @@ class OdometerGauge(QWidget):
 
 
     def setSpeed(self, value):
-        self._speed = value
+        clamped = max(0, min(value, self.max_speed))
+        self._speed = clamped
         self.update()
 
     speed = pyqtProperty(int, fget=getSpeed, fset=setSpeed)
 
 
     def animateTo(self, value):
+        target = max(0, min(value, self.max_speed))
         self.anim.stop()
         self.anim.setStartValue(self._speed)
-        self.anim.setEndValue(value)
+        self.anim.setEndValue(target)
         self.anim.start()
 
 
@@ -490,6 +486,38 @@ class VehicleTelemetryWindow(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setTabBarAutoHide(False)
+        self.tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 10px;
+                background: #0b111c;
+            }
+            QTabBar::tab {
+                background: rgba(255,255,255,0.04);
+                color: #e8ecf3;
+                padding: 8px 16px;
+                border: 1px solid rgba(255,255,255,0.08);
+                border-bottom-color: rgba(255,255,255,0.04);
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: rgba(0,210,255,0.18);
+                color: #0fd3ff;
+                border: 1px solid rgba(0,210,255,0.55);
+                border-bottom-color: #0b111c;
+            }
+            QTabBar::tab:hover {
+                background: rgba(0,210,255,0.12);
+                color: #e8ecf3;
+            }
+            QTabBar::tab:!selected {
+                margin-top: 4px;
+            }
+            """
+        )
         root.addWidget(self.tabs)
 
         dashboardTab = QWidget()
@@ -623,16 +651,49 @@ class VehicleTelemetryWindow(QWidget):
             front = float(data.get("frontDistance", self.proximity.front_dist))
             left = float(data.get("leftDistance", self.proximity.left_dist))
             right = float(data.get("rightDistance", self.proximity.right_dist))
-            back = float(data.get("backDistance", self.proximity.back_dist if hasattr(self.proximity, "back_dist") else front))
-            self.proximity.setDistances(front, back, left, right)
+            self.proximity.setDistances(front, left, right)
         except Exception:
             pass
 
         try:
+            ax = float(data.get("accelerationX", 0.0))
+            ay = float(data.get("accelerationY", 0.0))
+            az = float(data.get("accelerationZ", 0.0))
+            if self.accelVis is not None:
+                self.accelVis.setAccel(ax, ay, az)
+        except Exception:
+            pass
+
+        try:
+            roll = data.get("roll")
+            pitch = data.get("pitch")
+            yaw = data.get("yaw")
+            if self.gyroVis is not None:
+                if None not in (roll, pitch, yaw):
+                    self.gyroVis.setGyro(float(roll), float(pitch), float(yaw))
+                else:
+                    # Fallback: derive roll/pitch from accelerometer and yaw from magnetometer
+                    mx = float(data.get("magneticX", 0.0))
+                    my = float(data.get("magneticY", 0.0))
+                    mz = float(data.get("magneticZ", 0.0))
+                    # avoid div by zero
+                    denom = max(1e-6, math.sqrt(ay * ay + az * az))
+                    roll_est = math.degrees(math.atan2(ay, az))
+                    pitch_est = math.degrees(math.atan2(-ax, denom))
+                    # simple yaw from magnetometer (uncompensated tilt)
+                    yaw_est = math.degrees(math.atan2(-my, mx))
+                    self.gyroVis.setGyro(roll_est, pitch_est, yaw_est)
+        except Exception:
+            pass
+
+        try:
+            # print(data)
+            # print("Speed data:", data["speed"])
             spd = float(data.get("speed", 0.0))
             self.speedLabel.setText(f"{spd:.0f} km/h")
             if hasattr(self, "odometer"):
-                self.odometer.animateTo(int(spd))
+                safe_spd = max(0.0, min(spd, self.odometer.max_speed))
+                self.odometer.animateTo(int(safe_spd))
         except Exception:
             pass
 
