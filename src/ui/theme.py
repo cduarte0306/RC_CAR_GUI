@@ -151,6 +151,14 @@ QScrollBar::handle:horizontal {{
 QScrollBar::handle:horizontal:hover {{
     background: rgba(0, 210, 255, 0.5);
 }}
+
+QToolTip {{
+    background-color: #0b111c;
+    color: {TEXT_PRIMARY};
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    padding: 6px 8px;
+    border-radius: 6px;
+}}
 """
 
 def apply_app_theme(app) -> None:
