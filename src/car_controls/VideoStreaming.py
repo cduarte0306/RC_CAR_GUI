@@ -26,13 +26,29 @@ class FrameMetadata(ctypes.Structure):
         ("length",      ctypes.c_uint16),
     ]
 
-class Frame(ctypes.Structure):
-    MAX_SIZE = MAX_UDP_PACKET_SIZE - ctypes.sizeof(FrameMetadata)
-
+class FragmentHeader(ctypes.Structure):
     _pack_ = 1
     _fields_ = [
-        ("metadata",  FrameMetadata),
+        ("frameType",   ctypes.c_uint8),  # 0: Mono, 1: Stereo
+        ("frameSide",   ctypes.c_uint8),  # 0: Left, 1: Right (for stereo)
+    ]
+
+class Frame(ctypes.Structure):
+    MAX_SIZE = MAX_UDP_PACKET_SIZE - (ctypes.sizeof(FrameMetadata) + ctypes.sizeof(FragmentHeader))
+    _pack_ = 1
+    _fields_ = [
+        ("frameHeader", FragmentHeader),
+        ("metadata",    FrameMetadata),
         ("payload",     ctypes.c_uint8 * MAX_SIZE),
+    ]
+
+
+class FrameHeader(ctypes.Structure):
+    """Lightweight header view for receive parsing (no giant payload)."""
+    _pack_ = 1
+    _fields_ = [
+        ("frameHeader", FragmentHeader),
+        ("metadata",    FrameMetadata),
     ]
     
 class VideoStreamer:
@@ -48,18 +64,24 @@ class VideoStreamer:
         self.running = True
         self.__streamOutCanRun = False
         self.__sendFrameID = 0
-        self.__segmentMap : dict = {}
-        self.__recvFrameID = None
+        self.__segmentMapMono: dict[int, bytes] = {}
+        self.__segmentMapL: dict[int, bytes] = {}  # Left frame segments
+        self.__segmentMapR: dict[int, bytes] = {}  # Right frame segments
+        self.__recvFrameIDMono: int | None = None
+        self.__recvFrameIDStereo: int | None = None
+        self.__expectedSegmentsMono: int = 0
+        self.__expectedSegmentsStereo: int = 0
         self.__receivedFrameBuff = bytearray()
         self.__lastRecvFrameTime : float | None = None
+        self.__lastFpsTime : float | None = None
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
-        # self.__dispThread    = Thread(target=self.__imShowThread, daemon=True)
         self.__sendThread    = None  # Create on demand
         
         # Circular buffer
-        self.__frameBuffer   = CircularBuffer(100)
-        self.__streamInBuff  = CircularBuffer(100)
+        self.__frameBufferMono   = CircularBuffer(100)
+        self.__frameBufferStereo = CircularBuffer(100)
+        self.__streamInBuff  = CircularBuffer(200)
         self.__streamOutBuff = CircularBuffer(100)
         
         # Signals
@@ -73,6 +95,8 @@ class VideoStreamer:
         # self.__streamOutSocket = UDP(VideoStreamer.PORT, host="192.168.1.10")
         self.__streamOutSocket = streamOutAdapter
         self.__srcFile:str = path
+        
+        self.__fpsDelta : float
         
         self.__receiveThread.start()
 
@@ -138,22 +162,25 @@ class VideoStreamer:
 
 
     def getFrameIn(self) -> None | np.ndarray:
-        """
-        Handles the reading of the frame
+        """Return next available frame. Prefers stereo if present, else mono."""
+        if not self.__frameBufferMono.empty():
+            return self.__frameBufferMono.read()
+        return None
+    
+    
+    def getFrameBufferInStereo(self) -> None | np.ndarray:
+        """Return the stereo frame buffer."""
+        if not self.__frameBufferStereo.empty():
+            return self.__frameBufferStereo.read()
+        return None
 
-        Returns:
-            None | np.ndarray: _description_
-        """
-        if self.__frameBuffer.empty():
-            return None
-        
-        return self.__frameBuffer.read()
 
-
-    def __sendFrame(self, data: bytes) -> None:
+    def __sendFrame(self, data: bytes, frameType: int = 0, frameSide: int = 0) -> None:
         ret = False
         frameMeta = FrameMetadata()
         frame = Frame()
+        frame.frameHeader.frameType = frameType
+        frame.frameHeader.frameSide = frameSide
 
         bytesRemaining = len(data)
         offset = 0
@@ -245,7 +272,7 @@ class VideoStreamer:
             self.frameSentSignal.emit(bytes_sent, total_estimate)
         # Final emission to ensure UI hits 100%
         final_total = max(total_estimate, bytes_sent, fileSize)
-        self.frameSentSignal.emit(final_total, total_estimate)
+        self.frameSentSignal.emit(final_total, final_total)
         logging.info("Upload bytes sent=%d, file_size=%d, total_estimate=%d", bytes_sent, fileSize, total_estimate)
         # Fire ending signal
         self.endingVideoTransmission.emit()
@@ -263,65 +290,204 @@ class VideoStreamer:
                 continue
 
             data = self.__streamInBuff.read()
-            frameSeg = Frame.from_buffer_copy(data)
-            seqID      = frameSeg.metadata.sequenceID
-            segID      = frameSeg.metadata.segmentID
-            numSegs    = frameSeg.metadata.numSegments
-            totalLen   = frameSeg.metadata.totalLength
-            segLen     = frameSeg.metadata.length
+            if data is None:
+                continue
 
-            # Resize received frame buffer if needed (not strictly required)
-            if len(self.__receivedFrameBuff) < totalLen:
-                self.__receivedFrameBuff = bytearray(totalLen)
+            header_size = ctypes.sizeof(FrameHeader)
+            if len(data) < header_size:
+                logging.warning("Received frame chunk too small for header (%d bytes)", len(data))
+                continue
 
-            # If new frame arrives before old is complete → drop old frame
-            if (self.__recvFrameID is not None and
-                seqID != self.__recvFrameID and
-                len(self.__segmentMap) > 0 and
-                len(self.__segmentMap) < self.__expectedSegments):
+            frameHdr = FrameHeader.from_buffer_copy(data[:header_size])
+            frameType  = frameHdr.frameHeader.frameType
+            frameSide  = frameHdr.frameHeader.frameSide
 
-                logging.warning(f"Dropping incomplete frame ID {self.__recvFrameID}")
-                self.__segmentMap.clear()
+            if frameType == 0:
+                self.assembleMonoFrame(data, frameHdr)
+            elif frameType == 1:
+                self.assembleStereoFrame(data, frameHdr, frameSide)
 
-            # If starting a new frame, record segment count + ID
-            if self.__recvFrameID != seqID:
-                self.__recvFrameID = seqID
-                self.__expectedSegments = numSegs
-                self.__segmentMap.clear()
 
-            # Store segment
-            self.__segmentMap[segID] = bytes(frameSeg.payload[:segLen])
+    def assembleMonoFrame(self, data : bytes, header: FrameHeader) -> None:
+        """
+        Assemble a mono frame from received segments
 
-            # Completed frame?
-            if len(self.__segmentMap) == self.__expectedSegments:
-                jpeg_bytes = bytearray()
+        Args:
+            data (bytes): Frame data
+        """
+        header_size = ctypes.sizeof(FrameHeader)
+        seqID      = header.metadata.sequenceID
+        segID      = header.metadata.segmentID
+        numSegs    = header.metadata.numSegments
+        totalLen   = header.metadata.totalLength
+        segLen     = header.metadata.length
+        
+        # Resize received frame buffer if needed (not strictly required)
+        if len(self.__receivedFrameBuff) < totalLen:
+            self.__receivedFrameBuff = bytearray(totalLen)
 
-                for i in range(self.__expectedSegments):
-                    if i not in self.__segmentMap:
-                        logging.warning(
-                            f"Missing segment {i} for frame {self.__recvFrameID}"
-                        )
-                        self.__segmentMap.clear()
-                        self.__recvFrameID = None
-                        return
-                    jpeg_bytes.extend(self.__segmentMap[i])
+        # If new frame arrives before old is complete → drop old frame
+        if (self.__recvFrameIDMono is not None and
+            seqID != self.__recvFrameIDMono and
+            len(self.__segmentMapMono) > 0 and
+            len(self.__segmentMapMono) < self.__expectedSegmentsMono):
 
-                npbuf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-                frame = cv2.imdecode(npbuf, cv2.IMREAD_COLOR)
+            logging.warning(f"Dropping incomplete mono frame ID {self.__recvFrameIDMono}")
+            self.__segmentMapMono.clear()
 
-                # Compute and overlay receive FPS
-                now = time.time()
-                fps_text = ""  # default when unknown
-                if self.__lastRecvFrameTime is not None:
-                    delta = now - self.__lastRecvFrameTime
-                    if delta > 0:
-                        fps_val = 1.0 / delta
-                        fps_text = f"FPS: {fps_val:.1f}"
-                self.__lastRecvFrameTime = now
+        # If starting a new frame, record segment count + ID
+        if self.__recvFrameIDMono != seqID:
+            self.__recvFrameIDMono = seqID
+            self.__expectedSegmentsMono = numSegs
+            self.__segmentMapMono.clear()
 
-                if fps_text:
+        # Store segment
+        payload_start = header_size
+        payload_end = header_size + segLen
+        if payload_end > len(data):
+            logging.warning("Mono segment payload truncated (seq=%d seg=%d expected=%d have=%d)", seqID, segID, segLen, len(data) - header_size)
+            return
+        self.__segmentMapMono[segID] = bytes(data[payload_start:payload_end])
+
+        # Completed frame?
+        if len(self.__segmentMapMono) == self.__expectedSegmentsMono:
+            jpeg_bytes = bytearray()
+
+            for i in range(self.__expectedSegmentsMono):
+                if i not in self.__segmentMapMono:
+                    logging.warning(
+                        f"Missing segment {i} for mono frame {self.__recvFrameIDMono}"
+                    )
+                    self.__segmentMapMono.clear()
+                    self.__recvFrameIDMono = None
+                    return
+                jpeg_bytes.extend(self.__segmentMapMono[i])
+
+            npbuf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(npbuf, cv2.IMREAD_COLOR)
+
+            # Compute and overlay receive FPS
+            now = time.time()
+            fps_text = ""  # default when unknown
+            if self.__lastRecvFrameTime is not None:
+                if self.__lastFpsTime is None or now - self.__lastFpsTime >= 1.0:
+                    self.__lastFpsTime = now
+                    self.__fpsDelta = now - self.__lastRecvFrameTime
+                if self.__fpsDelta > 0:
+                    fps_val = 1.0 / self.__fpsDelta
+                    fps_text = f"FPS: {fps_val:.1f}"
+            self.__lastRecvFrameTime = now
+
+            if fps_text:
+                cv2.putText(
+                    frame,
+                    fps_text,
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            self.__segmentMapMono.clear()
+            self.__recvFrameIDMono = None
+            rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            self.__frameBufferMono.push(rgbImage)
+
+    
+    def assembleStereoFrame(self, data : bytes, header: FrameHeader, side : int) -> None:
+        """
+        Assemble a stereo frame from received segments
+
+        Args:
+            data (bytes): Frame data
+            side (int): Side of the stereo frame (e.g., left or right)
+        """
+        header_size = ctypes.sizeof(FrameHeader)
+        seqID    = header.metadata.sequenceID
+        segID    = header.metadata.segmentID
+        numSegs  = header.metadata.numSegments
+        totalLen = header.metadata.totalLength
+        segLen   = header.metadata.length
+
+        segmentMap : dict[int, bytes] = self.__segmentMapL if side == 0 else self.__segmentMapR
+
+        # Resize received frame buffer if needed (not strictly required)
+        if len(self.__receivedFrameBuff) < totalLen:
+            self.__receivedFrameBuff = bytearray(totalLen)
+
+        # If new frame arrives before old is complete → drop old frame
+        if (self.__recvFrameIDStereo is not None and
+            seqID != self.__recvFrameIDStereo and
+            (len(self.__segmentMapL) > 0 or len(self.__segmentMapR) > 0)):
+
+            logging.warning(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereo}")
+            self.__segmentMapL.clear()
+            self.__segmentMapR.clear()
+
+        # If starting a new frame, record segment count + ID
+        if self.__recvFrameIDStereo != seqID:
+            self.__recvFrameIDStereo = seqID
+            self.__expectedSegmentsStereo = numSegs
+            self.__segmentMapL.clear()
+            self.__segmentMapR.clear()
+
+        # Store segment
+        payload_start = header_size
+        payload_end = header_size + segLen
+        if payload_end > len(data):
+            logging.warning("Stereo segment payload truncated (seq=%d seg=%d expected=%d have=%d)", seqID, segID, segLen, len(data) - header_size)
+            return
+        segmentMap[segID] = bytes(data[payload_start:payload_end])
+
+        # Completed frame?
+        if (len(self.__segmentMapR) == self.__expectedSegmentsStereo) and \
+           (len(self.__segmentMapL) == self.__expectedSegmentsStereo):
+
+            # Build left and right JPEGs separately using the full maps
+            left_bytes = bytearray()
+            right_bytes = bytearray()
+
+            for i in range(self.__expectedSegmentsStereo):
+                if i not in self.__segmentMapL or i not in self.__segmentMapR:
+                    logging.warning(
+                        f"Missing segment {i} for stereo frame {self.__recvFrameIDStereo}"
+                    )
+                    self.__segmentMapL.clear()
+                    self.__segmentMapR.clear()
+                    self.__recvFrameIDStereo = None
+                    return
+                left_bytes.extend(self.__segmentMapL[i])
+                right_bytes.extend(self.__segmentMapR[i])
+
+            left_img = cv2.imdecode(np.frombuffer(left_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+            right_img = cv2.imdecode(np.frombuffer(right_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+            if left_img is None or right_img is None:
+                logging.warning("Failed to decode stereo images for frame %s", self.__recvFrameIDStereo)
+                self.__segmentMapL.clear()
+                self.__segmentMapR.clear()
+                self.__recvFrameIDStereo = None
+                return
+
+            # Compute and overlay receive FPS
+            now = time.time()
+            fps_text = ""  # default when unknown
+            if self.__lastRecvFrameTime is not None:
+                if self.__lastFpsTime is None or now - self.__lastFpsTime >= 1.0:
+                    self.__lastFpsTime = now
+                    self.__fpsDelta = now - self.__lastRecvFrameTime
+                if self.__fpsDelta > 0:
+                    fps_val = 1.0 / self.__fpsDelta
+                    fps_text = f"FPS: {fps_val:.1f}"
+            self.__lastRecvFrameTime = now
+
+            if fps_text:
+                for img in (left_img, right_img):
                     cv2.putText(
-                        frame,
+                        img,
                         fps_text,
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
@@ -331,40 +497,15 @@ class VideoStreamer:
                         cv2.LINE_AA,
                     )
 
-                self.__segmentMap.clear()
-                self.__recvFrameID = None
-                
-                rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                self.__frameBuffer.push(rgbImage)
-
-
-    def __imShowThread(self):
-        logging.info("Video receiving thread started.")
-        prev_frame_time = 0
-        new_frame_time = 0
-
-        while self.running:
-            if self.__frameBuffer.empty():
-                continue
-
-            frame = self.__frameBuffer.read()
-            if frame is None:
-                continue
-
-            new_frame_time = time.time()
+            # Stitch side-by-side so existing UI can render a single frame
             try:
-                fps = 1 / (new_frame_time - prev_frame_time)
-            except ZeroDivisionError:
-                pass
-            prev_frame_time = new_frame_time
+                stitched = cv2.hconcat([left_img, right_img])
+            except Exception:
+                stitched = left_img
 
-            # Convert FPS to string and round to an integer for display
-            fps_text = str(int(fps))
+            self.__segmentMapL.clear()
+            self.__segmentMapR.clear()
+            self.__recvFrameIDStereo = None
+            rgbImage = cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB)
 
-            # Overlay FPS on the frame
-            cv2.putText(frame, f"FPS: {fps_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
-
-        # self.__cap.release()
-        cv2.destroyAllWindows()
-        logging.info("Video receiving thread stopped.")
+            self.__frameBufferStereo.push(rgbImage)

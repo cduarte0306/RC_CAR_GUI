@@ -1,7 +1,7 @@
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer
 from utils.utilities import CircularBuffer
 
-from car_controls.VideoStreaming import VideoStreamer
+from car_controls.VideoStreaming import VideoStreamer, FrameHeader
 from car_controls.controller import Controller
 from car_controls.CommandBus import CamCommands, CamStreamModes, CommandBus, Command, commands, CameraCommand
 from network.NetworkManager import NetworkManager
@@ -13,24 +13,29 @@ import subprocess
 import re
 import ctypes
 
-from threading import Thread
+from threading import Thread, Event
 import time
 import logging
 
 
 class BackendIface(QThread):
-    videoBufferSignal = pyqtSignal(object)  # Frame received signal
-    deviceDiscovered  = pyqtSignal(str)  # Device discovered signal (emits IP)
-    deviceConnected   = pyqtSignal(str)  # Device connected (emits IP)
-    deviceMacResolved = pyqtSignal(str, str)  # Emits (ip, mac)
-    videoModeRequested = pyqtSignal(str)  # Emits requested camera mode (regular/depth)
-    telemetryReceived  = pyqtSignal(bytes)  # Telemetry data received
-    videoUploadProgress = pyqtSignal(int, int)  # Emitted during video file upload (sent bytes, total bytes)
-    videoUploadFinished = pyqtSignal()  # Emitted when video upload is finished
-    commandReplyReceived = pyqtSignal(bytes)  # Replies from command/ctrl socket
+    videoBufferSignal       = pyqtSignal(object, object) # Frame received signal (left and right frames)
+    videoBufferSignalStereo = pyqtSignal(object, object) # Stereo frame received signal (left and right frames)
+    deviceDiscovered        = pyqtSignal(str)            # Device discovered signal (emits IP)
+    deviceConnected         = pyqtSignal(str)            # Device connected (emits IP)
+    deviceMacResolved       = pyqtSignal(str, str)       # Emits (ip, mac)
+    videoModeRequested      = pyqtSignal(str)            # Emits requested camera mode (regular/depth)
+    telemetryReceived       = pyqtSignal(bytes)          # Telemetry data received
+    videoUploadProgress     = pyqtSignal(int, int)       # Emitted during video file upload (sent bytes, total bytes)
+    videoUploadFinished     = pyqtSignal()               # Emitted when video upload is finished
+    commandReplyReceived    = pyqtSignal(bytes)          # Replies from command/ctrl socket
+    notifyDisconnect        = pyqtSignal()               # Notify UI of disconnection
+    controllerConnected     = pyqtSignal(str)            # Notify UI of controller connection
+    controllerBatteryLevel  = pyqtSignal(int)            # Notify UI of controller battery level
+    controllerDisconnected  = pyqtSignal()               # Notify UI of controller disconnection
 
     CONTROLLER_PORT = 65000
-    STREAM_PORT     = 5000
+    STREAM_PORT     = 5005
     TELEMETRY_PORT  = 6000
 
     def __init__(self):
@@ -75,12 +80,44 @@ class BackendIface(QThread):
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
         self.__commandBus.replyReceived.connect(lambda reply: self.commandReplyReceived.emit(ctypes.string_at(ctypes.addressof(reply), ctypes.sizeof(reply))))
-
+        self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
+        self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
+        self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
+        self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
+    
         # Default to regular camera streaming mode
         self.setStreamMode(False)
         
+        self.__disconnectTimer : int = 0  # Disconnect timer counter
+        
         # Ping thread
         self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
+        self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
+        
+    
+    def __clearTimers(self) -> None:
+        """
+        Clear disconnect timers
+        """
+        self.__disconnectTimer = 0
+        
+
+    def __check_disconnect(self) -> None:
+        """
+        Check for device disconnection
+        """
+        if self.__connected_ip == "":
+            return
+        
+        while True:
+            time.sleep(1)
+            self.__disconnectTimer += 1
+            if self.__disconnectTimer >= 5:  # 5 seconds timeout
+                logging.warning("No communication from device %s; assuming disconnected", self.__connected_ip)
+                self.__connected_ip = ""
+                self.notifyDisconnect.emit()
+                self.__disconnectTimer = 0
+                break
 
 
     def __controllerReplyCallback(self, data: bytes) -> None:
@@ -105,6 +142,9 @@ class BackendIface(QThread):
         Args:
             data (bytes): Telemetry data
         """
+        if self.__looks_like_video_packet(data):
+            self.__videoReceivedCallback(data)
+            return
         # For now, just log telemetry size
         logging.debug("Received telemetry data (%d bytes)", len(data))
         self.__tlmBuffer.push(data)
@@ -138,6 +178,41 @@ class BackendIface(QThread):
         ret = self.__videoStreamerOutAdapter.send(packet)
         if not ret:
             logging.error("Failed to transmit frame over UDP")
+
+
+    def __looks_like_video_packet(self, data: bytes) -> bool:
+        header_size = ctypes.sizeof(FrameHeader)
+        if len(data) < header_size:
+            return False
+
+        try:
+            frame_hdr = FrameHeader.from_buffer_copy(data[:header_size])
+        except Exception:
+            return False
+
+        frame_type = frame_hdr.frameHeader.frameType
+        frame_side = frame_hdr.frameHeader.frameSide
+        seg_id = frame_hdr.metadata.segmentID
+        num_segs = frame_hdr.metadata.numSegments
+        total_len = frame_hdr.metadata.totalLength
+        seg_len = frame_hdr.metadata.length
+
+        if frame_type not in (0, 1):
+            return False
+        if frame_side not in (0, 1):
+            return False
+        if num_segs <= 0 or seg_id >= num_segs:
+            return False
+        if seg_len <= 0:
+            return False
+        if total_len < seg_len:
+            return False
+        if seg_len > len(data) - header_size:
+            return False
+        if total_len > 10 * 1024 * 1024:
+            return False
+
+        return True
 
 
     def __resolve_mac(self, ip: str) -> str:
@@ -298,6 +373,9 @@ class BackendIface(QThread):
         
         # Start the constant ping thread to keep connection alive
         self.__ping_thread.start()
+        
+        # Start disconnect timer
+        self.__disconnectTimerObj.start()
 
 
     def getDevices(self) -> list:
@@ -324,12 +402,20 @@ class BackendIface(QThread):
         """
         Main UI interface thread
         """
+        
         while True:
             frame = self.__videoStreamer.getFrameIn()
             if frame is not None:
-                self.videoBufferSignal.emit(frame)
-                
+                self.__clearTimers()
+                self.videoBufferSignal.emit(frame, None)
+
+            frameStereo = self.__videoStreamer.getFrameBufferInStereo()
+            if frameStereo is not None:
+                self.__clearTimers()
+                self.videoBufferSignalStereo.emit(frameStereo, None)  # stacked stereo frame    
+
             if self.__tlmBuffer.empty() == False:
+                self.__clearTimers()
                 tlm = self.__tlmBuffer.read()
                 self.telemetryReceived.emit(tlm)
                 

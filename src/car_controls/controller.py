@@ -1,9 +1,11 @@
 from pydualsense import pydualsense, TriggerModes
+from pydualsense.enums import ConnectionType
 
 from threading import Event
 
 import time
 import logging
+import types
 
 from utils.utilities import Signal
 from .BaseClass import BaseClass
@@ -11,10 +13,14 @@ from .CommandBus import CommandBus, Command, commands
 
 
 class Controller(BaseClass):
+    controllerDetected = Signal(str)  # Emitted when a controller is detected
+    controllerBatteryLevel = Signal(int)  # Emitted when battery level changes
+    controllerDisconnected = Signal()  # Emitted when controller is disconnected
+    
     def __init__( self, CommandBus: CommandBus ) -> None:
         super().__init__()  # Initialize parent class
 
-        self.__ds = pydualsense()
+        self.__ds = self.__create_dualsense()
 
         self.__last_joystick_x : int = 0
         self.__last_joystick_y : int = 0
@@ -25,6 +31,7 @@ class Controller(BaseClass):
 
         # Shutdown event for graceful thread termination
         self.__shutdownEvent = Event()
+        self.__shutdownEvent.clear()
 
         # Command dispatch
         self.__bus = CommandBus
@@ -38,24 +45,35 @@ class Controller(BaseClass):
         # self.__udpClient.deviceFound.connect(lambda ip: self.deviceFound.emit(ip))
 
         # Start the controller detection thread
-        self.createThread("controller-discover", self.__findController)
+        self.createThread("controller-discover", self.__controllerConnectionManager)
 
 
-    def __findController(self) -> None:
+    def __controllerConnectionManager(self) -> None:
         """
         Controller scanning thread
         """
-        while self.threadCanRun:
-            # Find controller
+        while not self.__shutdownEvent.is_set():
+            # Connected mode
             if self.__controllerConnected:
-                time.sleep(1)
+                level : int = self.__ds.battery.Level
+                self.controllerBatteryLevel.emit(level)
+                
+                if level >= 60:
+                    self.__ds.light.setColorI(0, 255, 0)  # Green
+                elif level < 60 and level >= 20:
+                    self.__ds.light.setColorI(255, 255, 0)  # Yellow
+                else:
+                    self.__ds.light.setColorI(255, 0, 0)  # Red
+                
+                time.sleep(0.1)
+                if not self.__ds.connected:
+                    logging.warning("Controller disconnected")
+                    self.__mark_disconnected()
+                    self.__controllerConnected = False
                 continue
 
             try:
                 self.__ds.init()
-                
-                # Set touchpad color to red
-                self.__ds.light.setColorI(255, 255, 0)
 
                 # Set left trigger to resistance mode
                 self.__ds.triggerL.setMode(TriggerModes.Rigid)
@@ -69,37 +87,49 @@ class Controller(BaseClass):
                 
                 self.__controllerConnected = True
                 logging.info("Controller initialized")
-
-                # Start a dedicated listener so pydualsense can dispatch callbacks
-                # (callbacks will not fire unless listen()/poll is running)
-                if not self.__event_loop_started:
-                    self.createThread("controller-events", self.__eventLoop)
-                    self.__event_loop_started = True
+                
+                connectionType : str = "USB" if self.__ds.determineConnectionType() == ConnectionType.USB else "Bluetooth"
+                logging.info("Controller connected via %s", connectionType)
+                self.controllerDetected.emit(connectionType)
             except Exception as e:
                 self.__controllerConnected = False
             time.sleep(0.1)
 
 
-    def __eventLoop(self) -> None:
-        """Pump pydualsense events so registered callbacks fire."""
-        while not self.__shutdownEvent.is_set():
-            try:
-                if hasattr(self.__ds, "listen"):
-                    # listen() blocks until close() is called
-                    self.__ds.listen()
-                    break
-                elif hasattr(self.__ds, "update"):
-                    self.__ds.update()
-                else:
-                    logging.error("pydualsense has no listen/update method; cannot pump events")
-                    break
-            except Exception as e:
-                logging.error("Controller event loop error: %s", e)
-                time.sleep(0.2)
-        logging.info("Controller event loop stopped")
+    def __create_dualsense(self) -> pydualsense:
+        """
+        Create a DualSense instance with a non-blocking connection-type probe
+        so reconnects don't hang on device reads.
+        """
+        ds = pydualsense()
 
-        # Mark disconnected so the discover thread can try to re-init
-        self.__mark_disconnected()
+        def _determine_connection_type(self) -> ConnectionType:
+            # Try a few short reads so init doesn't block forever after reconnects.
+            for _ in range(10):
+                try:
+                    dummy_report = self.device.read(100, timeout_ms=200)
+                except Exception:
+                    return ConnectionType.ERROR
+
+                if dummy_report:
+                    input_report_length = len(dummy_report)
+                    if input_report_length == 64:
+                        self.input_report_length = 64
+                        self.output_report_length = 64
+                        return ConnectionType.USB
+                    elif input_report_length == 78:
+                        self.input_report_length = 78
+                        self.output_report_length = 78
+                        return ConnectionType.BT
+
+                time.sleep(0.05)
+
+            return ConnectionType.ERROR
+
+        if hasattr(ds, "determineConnectionType"):
+            ds.determineConnectionType = types.MethodType(_determine_connection_type, ds)
+
+        return ds
 
 
     def shutdown(self) -> None:
@@ -173,10 +203,17 @@ class Controller(BaseClass):
 
     def __mark_disconnected(self) -> None:
         """Reset flags and close device so discovery can restart after loss."""
+        was_connected = self.__controllerConnected
         try:
             self.__ds.close()
-        except Exception:
-            pass
-
+        except Exception as e:
+            logging.error("Error closing controller device: %s", e)
+        
+        # Recreate the device wrapper to avoid stale handles after reconnects.
+        self.__ds = self.__create_dualsense()
+        
+        logging.info("Controller marked disconnected")
         self.__controllerConnected = False
         self.__event_loop_started = False
+        if was_connected:
+            self.controllerDisconnected.emit()

@@ -1,5 +1,6 @@
 import threading
-
+import logging
+import queue
 
 class Toolbox:
 
@@ -113,27 +114,50 @@ class Signal:
 
     def __init__(self, *arg_types):
         self._callbacks = []
+        self._lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=1024)
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
 
 
     def connect(self, callback):
         """Connects a callback function to the signal."""
-        if callable(callback) and callback not in self._callbacks:
-            self._callbacks.append(callback)
+        if not callable(callback):
+            return
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
 
 
     def disconnect(self, callback):
         """Disconnects a callback function from the signal."""
-        if callback in self._callbacks:
-            self._callbacks.remove(callback)
+        with self._lock:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
 
 
     def emit(self, *args, **kwargs):
         """Emits the signal, calling all connected callbacks."""
-        for callback in self._callbacks:
-            try:
-                callback(*args, **kwargs)
-            except Exception as e:
-                print(f"Error in callback {callback.__name__}: {e}")
+        try:
+            self._queue.put_nowait((args, kwargs))
+        except queue.Full:
+            logging.warning("Signal queue full; dropping emit")
+
+
+    def _run(self) -> None:
+        """Background worker to dispatch callbacks asynchronously."""
+        while True:
+            args, kwargs = self._queue.get()
+            with self._lock:
+                callbacks = tuple(self._callbacks)
+
+            for callback in callbacks:
+                try:
+                    callback(*args, **kwargs)
+                except Exception:
+                    logging.exception(
+                        "Error in callback %s", getattr(callback, "__name__", callback)
+                    )
 
 class Emitter:
     """An example class that emits a custom signal."""
