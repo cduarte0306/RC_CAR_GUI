@@ -1,0 +1,92 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build C++ Module",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "setup_cpp.py",
+                "build"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Build the C++ extension module using CMake"
+        },
+        {
+            "label": "Build C++ Module (Debug)",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "setup_cpp.py",
+                "build",
+                "--debug"
+            ],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Build the C++ extension module in debug mode"
+        },
+        {
+            "label": "Rebuild C++ Module",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "setup_cpp.py",
+                "rebuild"
+            ],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Clean and rebuild the C++ extension module"
+        },
+        {
+            "label": "Clean C++ Build",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "setup_cpp.py",
+                "clean"
+            ],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Clean all C++ build artifacts"
+        },
+        {
+            "label": "Test C++ Module",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "setup_cpp.py",
+                "test"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Build and run standalone C++ tests"
+        }
+    ]
+}
