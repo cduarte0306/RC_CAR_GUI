@@ -104,6 +104,32 @@ def normalize_vector(x, y, z):
             return (x, y, z)
 
 
+def create_renderer3d(clear_color=None):
+    """
+    Create a C++ backed 3D renderer if the extension module is available.
+
+    Args:
+        clear_color (tuple|list|None): Optional RGBA tuple to set the clear color.
+
+    Returns:
+        Renderer3D instance or None when the C++ module is unavailable.
+    """
+    if not _cpp_module_available:
+        logging.warning("C++ module not available - 3D renderer disabled")
+        return None
+
+    try:
+        renderer = _rc_car_cpp.Renderer3D()
+        if clear_color is not None and len(clear_color) >= 3:
+            r, g, b = clear_color[:3]
+            a = clear_color[3] if len(clear_color) > 3 else 1.0
+            renderer.set_clear_color(float(r), float(g), float(b), float(a))
+        return renderer
+    except Exception as exc:  # pragma: no cover - safety net
+        logging.error(f"Failed to create Renderer3D from C++ module: {exc}")
+        return None
+
+
 # Example usage
 if __name__ == "__main__":
     print("C++ Extensions Integration")
