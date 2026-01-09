@@ -271,7 +271,7 @@ def verify_python_module(python_modules_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build RC Car C++ extensions with CMake and MSVC",
+        description="Build RC Car C++ extensions with CMake",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -337,7 +337,8 @@ Examples:
         
         print_header("Build Complete!")
         print_success("C++ module is ready to use")
-        print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import rc_car_cpp")
+        module_name = "rc_car_cpp"
+        print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {module_name}")
         return 0
     
     elif args.command == "rebuild":
