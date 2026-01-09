@@ -48,7 +48,7 @@ brew install cmake
 ### 1. Clone and Initialize Submodules
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/cduarte0306/RC_CAR_GUI.git
 cd RC_CAR_GUI
 git submodule update --init --recursive
 ```

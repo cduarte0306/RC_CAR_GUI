@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Setup script for building RC Car C++ extensions using CMake and MSVC.
+Setup script for building RC Car C++ extensions using CMake.
 
 This script handles:
-- CMake configuration and generation for MSVC
-- Building the C++ DLL/pyd module using pybind11
+- CMake configuration and generation for multiple compilers (MSVC, GCC, Clang)
+- Building the C++ DLL/pyd/so module using pybind11
 - Cleaning build artifacts
 - Running standalone C++ tests
+- Cross-platform support for Windows, Linux, and macOS
 """
 
 import os
@@ -15,6 +16,9 @@ import shutil
 import subprocess
 import argparse
 from pathlib import Path
+
+# Module configuration
+MODULE_NAME = "rc_car_cpp"
 
 
 class Colors:
@@ -232,7 +236,7 @@ def verify_python_module(python_modules_dir):
     print_header("Verifying Python Module")
     
     # Look for the module
-    module_patterns = ["rc_car_cpp*.pyd", "rc_car_cpp*.so", "rc_car_cpp*.dll"]
+    module_patterns = [f"{MODULE_NAME}*.pyd", f"{MODULE_NAME}*.so", f"{MODULE_NAME}*.dll"]
     found_modules = []
     
     for pattern in module_patterns:
@@ -251,11 +255,11 @@ def verify_python_module(python_modules_dir):
     sys.path.insert(0, str(python_modules_dir))
     
     try:
-        import rc_car_cpp
-        print_success(f"Successfully imported rc_car_cpp module (version {rc_car_cpp.__version__})")
+        module = __import__(MODULE_NAME)
+        print_success(f"Successfully imported {MODULE_NAME} module (version {module.__version__})")
         
         # Test basic functionality
-        mag = rc_car_cpp.MathOperations.vector_magnitude(3.0, 4.0, 0.0)
+        mag = module.MathOperations.vector_magnitude(3.0, 4.0, 0.0)
         print_info(f"Test: vector_magnitude(3, 4, 0) = {mag}")
         assert abs(mag - 5.0) < 0.0001, "Vector magnitude test failed!"
         print_success("Python module is working correctly!")
@@ -337,8 +341,7 @@ Examples:
         
         print_header("Build Complete!")
         print_success("C++ module is ready to use")
-        module_name = "rc_car_cpp"
-        print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {module_name}")
+        print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {MODULE_NAME}")
         return 0
     
     elif args.command == "rebuild":
