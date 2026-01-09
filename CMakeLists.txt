@@ -21,8 +21,9 @@ target_include_directories(rc_car_core PUBLIC
 # Python module (DLL/shared library)
 pybind11_add_module(rc_car_cpp
     cpp/src/bindings.cpp
-    cpp/src/math_operations.cpp
 )
+
+target_link_libraries(rc_car_cpp PRIVATE rc_car_core)
 
 target_include_directories(rc_car_cpp PRIVATE
     ${CMAKE_SOURCE_DIR}/cpp/include
