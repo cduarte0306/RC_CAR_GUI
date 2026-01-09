@@ -7,6 +7,7 @@ to pure Python implementations if the C++ module is not available.
 
 import sys
 import logging
+import math
 from pathlib import Path
 
 # Try to import the C++ module
@@ -68,8 +69,6 @@ def angle_between_vectors(x1, y1, z1, x2, y2, z2):
         return _rc_car_cpp.MathOperations.angle_between_vectors(x1, y1, z1, x2, y2, z2)
     else:
         # Pure Python fallback
-        import math
-        
         dot = x1 * x2 + y1 * y2 + z1 * z2
         mag1 = vector_magnitude(x1, y1, z1)
         mag2 = vector_magnitude(x2, y2, z2)

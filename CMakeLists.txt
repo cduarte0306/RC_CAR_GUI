@@ -9,9 +9,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Add pybind11
 add_subdirectory(external/pybind11)
 
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR}/cpp/include)
-
 # Core C++ library (static library for standalone testing)
 add_library(rc_car_core STATIC
     cpp/src/math_operations.cpp
