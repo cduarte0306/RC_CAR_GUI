@@ -6,24 +6,40 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Add pybind11
-add_subdirectory(external/pybind11)
+# Add pybind11 (use submodule if available, otherwise fetch)
+include(FetchContent)
+set(PYBIND11_SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/pybind11)
+if(EXISTS ${PYBIND11_SOURCE_DIR}/CMakeLists.txt)
+    add_subdirectory(${PYBIND11_SOURCE_DIR})
+else()
+    message(WARNING "pybind11 submodule not found, fetching release archive")
+    FetchContent_Declare(
+        pybind11
+        URL https://github.com/pybind/pybind11/archive/refs/tags/v2.12.0.tar.gz
+    )
+    FetchContent_MakeAvailable(pybind11)
+endif()
+
+find_package(OpenGL REQUIRED)
 
 # Core C++ library (static library for standalone testing)
 add_library(rc_car_core STATIC
     cpp/src/math_operations.cpp
+    cpp/src/renderer3d.cpp
 )
 
 target_include_directories(rc_car_core PUBLIC
     ${CMAKE_SOURCE_DIR}/cpp/include
 )
 
+target_link_libraries(rc_car_core PUBLIC OpenGL::GL)
+
 # Python module (DLL/shared library)
 pybind11_add_module(rc_car_cpp
     cpp/src/bindings.cpp
 )
 
-target_link_libraries(rc_car_cpp PRIVATE rc_car_core)
+target_link_libraries(rc_car_cpp PRIVATE rc_car_core OpenGL::GL)
 
 target_include_directories(rc_car_cpp PRIVATE
     ${CMAKE_SOURCE_DIR}/cpp/include

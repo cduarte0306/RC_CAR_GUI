@@ -4,6 +4,7 @@ GUI for RC car telemetry and controls with high-performance C++ extensions.
 ## Features
 - PyQt6-based graphical interface for RC car control
 - High-performance C++ extensions via Pybind11 for robotics calculations
+- OpenGL-backed 3D visualization widget with Python bindings
 - CMake-based build system with MSVC support
 - Standalone C++ testing capabilities
 
@@ -20,6 +21,7 @@ GUI for RC car telemetry and controls with high-performance C++ extensions.
 - CMake 3.15 or higher
 - Microsoft Visual Studio (with C++ Desktop Development workload) on Windows
 - GCC or Clang on Linux/macOS
+- OpenGL development libraries (e.g., `libgl1-mesa-dev` and `libglu1-mesa-dev` on Linux)
 
 ## Installation
 
