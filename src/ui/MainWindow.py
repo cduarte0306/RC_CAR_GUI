@@ -213,6 +213,15 @@ class SidePanel(QFrame):
             self.autoHideTimer.stop()
 
             
+    def enterEvent(self, event):  # noqa: N802
+        self.autoHideTimer.stop()
+        super().enterEvent(event)
+
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.startAutoHide()
+        super().leaveEvent(event)
+
 class ClickableLabel(QLabel):
     """A QLabel that behaves like a transparent icon button (clickable)."""
     def __init__(self, pixmap, tooltip:str = "", callback=None, parent=None):
@@ -362,7 +371,7 @@ class WelcomeWindow(QWidget):
         # Avoid duplicates
         for i in range(self._devices_layout.count()):
             w = self._devices_layout.itemAt(i).widget()
-            if w and getattr(w, "deviceTooltip", None) == deviceTooltip:
+            if w and getattr(w, "_deviceTooltip", None) == deviceTooltip:
                 return
 
         # Use a ClickableLabel to avoid button chrome and background artifacts
@@ -373,6 +382,7 @@ class WelcomeWindow(QWidget):
 
         lbl = ClickableLabel(icon, tooltip=f"{deviceTooltip}\nClick to connect", callback=connect_callback)
         lbl._deviceTooltip = deviceTooltip
+        lbl._device_ip = deviceTooltip
         lbl.setFixedSize(72, 72)
         lbl.setScaledContents(True)
         self._devices_layout.addWidget(lbl)
@@ -534,6 +544,7 @@ class MainWindow(QMainWindow):
 
         self.contentFrame = QFrame()
         make_card(self.contentFrame)
+        self.contentFrame.setProperty("role", "main")
         self.__contentLayout = QVBoxLayout()
         self.__contentLayout.setContentsMargins(18, 18, 18, 18)
         self.__contentLayout.setSpacing(12)
@@ -596,6 +607,7 @@ class MainWindow(QMainWindow):
         
         self.__consumer.videoBufferSignal.connect(lambda left_frame, right_frame: self.__streamWindow.updateFrame(left_frame))
         self.__consumer.videoBufferSignalStereo.connect(lambda left_frame, right_frame: self.__streamWindow.updateStereoFrame(left_frame, right_frame))
+        self.__consumer.videoBufferSignalStereoMono.connect(lambda frame, gyroData: self.__streamWindow.updateFrame(frame, gyroData))
         self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
         self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
         self.__consumer.videoUploadFinished.connect(self.__streamWindow.finishUploadProgress)
@@ -603,10 +615,13 @@ class MainWindow(QMainWindow):
         self.__consumer.controllerConnected.connect(self.__onControllerConnected)
         self.__consumer.controllerBatteryLevel.connect(self.__onControllerBatteryLevel)
         self.__consumer.controllerDisconnected.connect(self.__onControllerDisconnected)
+        self.__consumer.failedToStoreVideoOnDevice.connect(self.__streamWindow.showErrorMessage)
+        self.__consumer.videoStoredToDevice.connect(self.__streamWindow.showVideoSavedMessage)
         
-        self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__consumer.setStreamMode(state))
-        self.__streamWindow.viewModeChanged.connect(self.__consumer.setVideoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
+        self.__streamWindow.streamModeChanged.connect(self.__consumer.setStreamMode)
+        self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
+        self.__streamWindow.saveVideoOnDevice.connect(self.__consumer.setSaveVideoOnDevice)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
 
 
@@ -818,3 +833,9 @@ class MainWindow(QMainWindow):
             self.side.slideIn()
         elif x > SidePanel.PANEL_WIDTH + 40:
             self.side.startAutoHide()
+        super().mouseMoveEvent(event)
+
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.side.startAutoHide()
+        super().leaveEvent(event)

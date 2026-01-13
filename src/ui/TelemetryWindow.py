@@ -668,9 +668,15 @@ class VehicleTelemetryWindow(QWidget):
             roll = data.get("roll")
             pitch = data.get("pitch")
             yaw = data.get("yaw")
+            gx = data.get("gyroX")
+            gy = data.get("gyroY")
+            gz = data.get("gyroZ")
             if self.gyroVis is not None:
                 if None not in (roll, pitch, yaw):
                     self.gyroVis.setGyro(float(roll), float(pitch), float(yaw))
+                elif None not in (gx, gy, gz):
+                    # Host provides gyro axes; display them directly if no roll/pitch/yaw are sent.
+                    self.gyroVis.setGyro(float(gx), float(gy), float(gz))
                 else:
                     # Fallback: derive roll/pitch from accelerometer and yaw from magnetometer
                     mx = float(data.get("magneticX", 0.0))
@@ -687,7 +693,6 @@ class VehicleTelemetryWindow(QWidget):
             pass
 
         try:
-            # print(data)
             # print("Speed data:", data["speed"])
             spd = float(data.get("speed", 0.0))
             self.speedLabel.setText(f"{spd:.0f} km/h")

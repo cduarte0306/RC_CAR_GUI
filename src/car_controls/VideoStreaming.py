@@ -19,6 +19,7 @@ MAX_UDP_PACKET_SIZE = 65507
 class FrameMetadata(ctypes.Structure):
     _pack_ = 1
     _fields_ = [
+        ("videoNameID",  ctypes.c_uint8 * 128),
         ("sequenceID",  ctypes.c_uint32),
         ("segmentID",   ctypes.c_uint8),
         ("numSegments", ctypes.c_uint8),
@@ -50,6 +51,26 @@ class FrameHeader(ctypes.Structure):
         ("frameHeader", FragmentHeader),
         ("metadata",    FrameMetadata),
     ]
+
+class StereoFrameMonoHeader(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("xPos",   ctypes.c_int16),
+        ("yPos",   ctypes.c_int16),
+        ("width",  ctypes.c_uint16),
+        ("frame",  ctypes.c_char_p)
+    ]
+    
+class GyroData(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("gyroX", ctypes.c_int16),
+        ("gyroY", ctypes.c_int16),
+        ("gyroZ", ctypes.c_int16),
+        ("accelX", ctypes.c_int16),
+        ("accelY", ctypes.c_int16),
+        ("accelZ", ctypes.c_int16),
+    ]
     
 class VideoStreamer:
     PORT = 5000
@@ -67,10 +88,13 @@ class VideoStreamer:
         self.__segmentMapMono: dict[int, bytes] = {}
         self.__segmentMapL: dict[int, bytes] = {}  # Left frame segments
         self.__segmentMapR: dict[int, bytes] = {}  # Right frame segments
+        self.__segmentMapStereoMono: dict[int, bytes] = {}
         self.__recvFrameIDMono: int | None = None
         self.__recvFrameIDStereo: int | None = None
+        self.__recvFrameIDStereoMono: int | None = None
         self.__expectedSegmentsMono: int = 0
         self.__expectedSegmentsStereo: int = 0
+        self.__expectedSegmentsStereoMono: int = 0
         self.__receivedFrameBuff = bytearray()
         self.__lastRecvFrameTime : float | None = None
         self.__lastFpsTime : float | None = None
@@ -81,6 +105,7 @@ class VideoStreamer:
         # Circular buffer
         self.__frameBufferMono   = CircularBuffer(100)
         self.__frameBufferStereo = CircularBuffer(100)
+        self.__frameBufferStereoMono = CircularBuffer(100)
         self.__streamInBuff  = CircularBuffer(200)
         self.__streamOutBuff = CircularBuffer(100)
         
@@ -101,14 +126,18 @@ class VideoStreamer:
         self.__receiveThread.start()
 
 
-    def setVideoSource(self, srcFile:str) -> None:
+    def setVideoSource(self, filePath:str) -> None:
         """
         Set the video source file for streaming out
 
         Args:
-            srcFile (str): Source file path
+            filePath (str): Source file path
         """
-        self.__srcFile = srcFile
+        # Check if the name of the video file itself does not exceed max length
+        videoName = os.path.basename(filePath)
+        if len(videoName) > 128:
+            raise ValueError("Source file name exceeds maximum length of 128 characters")
+        self.__srcFile = filePath
 
 
     def startStream(self, ip: str) -> bool:
@@ -173,11 +202,20 @@ class VideoStreamer:
         if not self.__frameBufferStereo.empty():
             return self.__frameBufferStereo.read()
         return None
+    
+    
+    def getFrameBufferInStereoMono(self) -> None | tuple[np.ndarray, int, int, int]:
+        """Return the stereo mono frame buffer."""
+        if not self.__frameBufferStereoMono.empty():
+            return self.__frameBufferStereoMono.read()
+        return None
 
 
-    def __sendFrame(self, data: bytes, frameType: int = 0, frameSide: int = 0) -> None:
+    def __sendFrame(self, data: bytes, frameType: int = 0, frameSide: int = 0, videoName : str = "") -> None:
         ret = False
         frameMeta = FrameMetadata()
+        frameMeta.videoNameID[:len(videoName)] = (ctypes.c_uint8 * len(videoName))(*bytearray(videoName, 'utf-8'))
+        frameMeta.videoNameID[len(videoName)] = 0  # Null-terminate
         frame = Frame()
         frame.frameHeader.frameType = frameType
         frame.frameHeader.frameSide = frameSide
@@ -239,6 +277,7 @@ class VideoStreamer:
         # Fire starting signal
         self.startingVideoTransmission.emit()
 
+        videoFileName = os.path.basename(self.__srcFile)
         cap : cv2.VideoCapture
         fileSize: int = os.path.getsize(self.__srcFile)
         bytes_sent: int = 0
@@ -265,7 +304,7 @@ class VideoStreamer:
             size = len(data)
 
             # Send frame immediately (no FPS cap)
-            self.__sendFrame(data)
+            self.__sendFrame(data, videoName=videoFileName)
             bytes_sent += size
             total_estimate = max(total_estimate, bytes_sent)
             # Emit cumulative progress (sent so far, current total estimate)
@@ -306,6 +345,8 @@ class VideoStreamer:
                 self.assembleMonoFrame(data, frameHdr)
             elif frameType == 1:
                 self.assembleStereoFrame(data, frameHdr, frameSide)
+            elif frameType == 2:
+                self.assembleStereoMonoFrame(data, frameHdr)
 
 
     def assembleMonoFrame(self, data : bytes, header: FrameHeader) -> None:
@@ -509,3 +550,104 @@ class VideoStreamer:
             rgbImage = cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB)
 
             self.__frameBufferStereo.push(rgbImage)
+            
+            
+    def assembleStereoMonoFrame(self, data : bytes, header: FrameHeader) -> None:
+        """
+        Assemble a stereo frame from received segments
+
+        Args:
+            data (bytes): Frame data
+            header (FrameHeader): Frame header information
+        """
+        header_size = ctypes.sizeof(FrameHeader)
+        seqID    = header.metadata.sequenceID
+        segID    = header.metadata.segmentID
+        numSegs  = header.metadata.numSegments
+        totalLen = header.metadata.totalLength
+        segLen   = header.metadata.length
+
+        # Resize received frame buffer if needed (not strictly required)
+        if len(self.__receivedFrameBuff) < totalLen:
+            self.__receivedFrameBuff = bytearray(totalLen)
+
+        # If new frame arrives before old is complete → drop old frame
+        if (self.__recvFrameIDStereoMono is not None and
+            seqID != self.__recvFrameIDStereoMono and
+            (len(self.__segmentMapStereoMono) > 0)):
+
+            logging.warning(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereoMono}")
+            self.__segmentMapStereoMono.clear()
+
+        # If starting a new frame, record segment count + ID
+        if self.__recvFrameIDStereoMono != seqID:
+            self.__recvFrameIDStereoMono = seqID
+            self.__expectedSegmentsStereoMono = numSegs
+            self.__segmentMapStereoMono.clear()
+
+        # Store segment
+        payload_start = header_size
+        payload_end = header_size + segLen
+        if payload_end > len(data):
+            logging.warning("Stereo segment payload truncated (seq=%d seg=%d expected=%d have=%d)", seqID, segID, segLen, len(data) - header_size)
+            return
+        self.__segmentMapStereoMono[segID] = bytes(data[payload_start:payload_end])
+
+        # Completed frame?
+        if (len(self.__segmentMapStereoMono) == self.__expectedSegmentsStereoMono):
+
+            # Build left and right JPEGs separately using the full maps
+            imgBytes = bytearray()
+
+            for i in range(self.__expectedSegmentsStereoMono):
+                if i not in self.__segmentMapStereoMono:
+                    logging.warning(
+                        f"Missing segment {i} for stereo frame {self.__recvFrameIDStereoMono}"
+                    )
+                    self.__segmentMapStereoMono.clear()
+                    self.__recvFrameIDStereoMono = None
+                    return
+                imgBytes.extend(self.__segmentMapStereoMono[i])
+                
+            # Extract the gyroscope data before decoding the image
+            gyro_data = GyroData.from_buffer_copy(imgBytes)
+            logging.debug("Gyro: x=%s y=%s z=%s", gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ)
+            imgBytes_ = imgBytes[ctypes.sizeof(GyroData):]
+            img = cv2.imdecode(np.frombuffer(imgBytes_, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+            if img is None:
+                logging.warning("Failed to decode stereo images for frame %s", self.__recvFrameIDStereoMono)
+                self.__segmentMapStereoMono.clear()
+                self.__recvFrameIDStereoMono = None
+                return
+
+            # Compute and overlay receive FPS
+            now = time.time()
+            fps_text = ""  # default when unknown
+            if self.__lastRecvFrameTime is not None:
+                if self.__lastFpsTime is None or now - self.__lastFpsTime >= 1.0:
+                    self.__lastFpsTime = now
+                    self.__fpsDelta = now - self.__lastRecvFrameTime
+                if self.__fpsDelta > 0:
+                    fps_val = 1.0 / self.__fpsDelta
+                    fps_text = f"FPS: {fps_val:.1f}"
+            self.__lastRecvFrameTime = now
+
+            if fps_text:
+                cv2.putText(
+                    img,
+                    fps_text,
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+            self.__segmentMapStereoMono.clear()
+            self.__recvFrameIDStereoMono = None
+            rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            data : tuple[np.ndarray, int, int, int] = (rgbImage, gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ) 
+            self.__frameBufferStereoMono.push((rgbImage, (gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ)))
+        

@@ -1,9 +1,10 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
-    QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox
+    QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
+    QApplication, QListWidget, QListWidgetItem
 )
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon
-from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor
+from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData
 import numpy as np
 import os
 
@@ -66,11 +67,151 @@ class IconButton(QPushButton):
         self.setIconSize(self._base_icon_size)
 
 
+class TearOffTabBar(QTabBar):
+    tearOffRequested = pyqtSignal(int, QPoint)
+    dockRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start = None
+        self._drag_index = -1
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            self._drag_index = self.tabAt(self._drag_start)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start is not None
+            and self._drag_index != -1
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            if self.tabData(self._drag_index) != "tearoff":
+                super().mouseMoveEvent(event)
+                return
+            distance = (event.pos() - self._drag_start).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData("application/x-rc-controls-tab", b"controls")
+                drag.setMimeData(mime)
+
+                tab_rect = self.tabRect(self._drag_index)
+                pix = self.grab(tab_rect)
+                if not pix.isNull():
+                    drag.setPixmap(pix)
+                    drag.setHotSpot(event.pos() - tab_rect.topLeft())
+
+                result = drag.exec(Qt.DropAction.MoveAction)
+                if result == Qt.DropAction.IgnoreAction:
+                    self.tearOffRequested.emit(self._drag_index, QCursor.pos())
+                    if self.window():
+                        self.window().activateWindow()
+                        self.window().raise_()
+                self._drag_start = None
+                self._drag_index = -1
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self._drag_index = -1
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            self.dockRequested.emit()
+            return
+        super().dropEvent(event)
+
+
+class DockHandle(QFrame):
+    """Draggable tab handle to dock the torn-off controls back into the tab bar."""
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self._label = QLabel(label, self)
+        self._label.setObjectName("dock-handle-title")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._drag_start: QPoint | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.addWidget(self._label)
+
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setStyleSheet(
+            """
+            QFrame {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+            }
+            QLabel#dock-handle-title {
+                color: #e8ecf3;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            """
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            distance = (event.pos() - self._drag_start).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData("application/x-rc-controls-tab", b"controls")
+                drag.setMimeData(mime)
+                drag.setHotSpot(event.pos())
+
+                pix = self.grab()
+                if not pix.isNull():
+                    drag.setPixmap(pix)
+                drag.exec(Qt.DropAction.MoveAction)
+                self._drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+
 class VideoStreamingWindow(QWidget):
 
-    startStreamOut     = pyqtSignal(bool, str) # File selected signals
-    viewModeChanged    = pyqtSignal(str)       # "regular" or "depth"
-    uploadVideoClicked = pyqtSignal(str)       # File selected signal
+    startStreamOut        = pyqtSignal(bool, str) # File selected signals
+    streamModeChanged     = pyqtSignal(str)       # "stereo_pairs", "stereo_mono", "simulation"
+    stereoMonoModeChanged = pyqtSignal(str)       # "normal", "disparity"
+    uploadVideoClicked    = pyqtSignal(str)       # File selected signal
+    setNormalMode         = pyqtSignal()
+    setDisparityMode      = pyqtSignal()
+    saveVideoOnDevice     = pyqtSignal(str)       # Signal to save video on device
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -93,49 +234,22 @@ class VideoStreamingWindow(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        self.__viewMode = "regular"
-        self.__modeButtons: dict[str, QPushButton] = {}
-        self.__modeGroup = QButtonGroup(self)
-        self.__modeGroup.setExclusive(True)
-
-        modeRow = QHBoxLayout()
-        modeRow.setSpacing(6)
-        for mode, label in (("regular", "Regular"), ("depth", "Depth")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: rgba(255,255,255,0.06);
-                    color: #e8ecf3;
-                    border: 1px solid rgba(255,255,255,0.12);
-                    border-radius: 10px;
-                    padding: 8px 14px;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(0,210,255,0.14);
-                    border: 1px solid rgba(0,210,255,0.32);
-                }
-                QPushButton:checked {
-                    background-color: rgba(0,210,255,0.18);
-                    border: 1px solid rgba(0,210,255,0.65);
-                    color: #0fd3ff;
-                }
-                """
-            )
-            btn.clicked.connect(lambda checked, m=mode: self.__setViewMode(m))
-            self.__modeGroup.addButton(btn)
-            self.__modeButtons[mode] = btn
-            modeRow.addWidget(btn)
-
-        self.__modeButtons[self.__viewMode].setChecked(True)
-        header.addLayout(modeRow)
+        self.__streamMode = "stereo_pairs"
+        self.__streamModeButtons: dict[str, QPushButton] = {}
+        self.__streamModeGroup = QButtonGroup(self)
+        self.__streamModeGroup.setExclusive(True)
+        self.__stereoMonoMode = "normal"
+        self.__stereoMonoButtons: dict[str, QPushButton] = {}
+        self.__stereoMonoGroup = QButtonGroup(self)
+        self.__stereoMonoGroup.setExclusive(True)
         root.addLayout(header)
 
         # Tabs
         self.__tabs = QTabWidget()
+        self.__tabBar = TearOffTabBar(self.__tabs)
+        self.__tabBar.tearOffRequested.connect(self.__onTearOffRequested)
+        self.__tabBar.dockRequested.connect(self.__dockControls)
+        self.__tabs.setTabBar(self.__tabBar)
         self.__tabs.setTabBarAutoHide(False)
         self.__tabs.setStyleSheet(
             """
@@ -194,24 +308,32 @@ class VideoStreamingWindow(QWidget):
 
         # Controls tab
         controlsTab = QWidget()
+        self.__controlsTab = controlsTab
+        self.__controlsTabLabel = "Stream Controls"
+        self.__controlsPopout: QDialog | None = None
+        self.__controlsTabIndex: int | None = None
         controlsLayout = QVBoxLayout()
         controlsLayout.setContentsMargins(8, 8, 8, 8)
         controlsLayout.setSpacing(12)
         controlsTab.setLayout(controlsLayout)
 
-        # Mode buttons (Regular/Depth)
-        modeCard = QFrame()
-        modeCard.setStyleSheet("border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);")
-        modeCardLayout = QVBoxLayout(modeCard)
-        modeCardLayout.setContentsMargins(12, 12, 12, 12)
-        modeCardLayout.setSpacing(8)
-        modeTitle = QLabel("View Mode")
-        modeTitle.setObjectName("card-title")
-        modeCardLayout.addWidget(modeTitle)
+        # Stream mode buttons (Stereo Pairs/Stereo-Mono/Simulation)
+        streamCard = QFrame()
+        streamCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        streamCardLayout = QVBoxLayout(streamCard)
+        streamCardLayout.setContentsMargins(12, 12, 12, 12)
+        streamCardLayout.setSpacing(8)
+        streamTitle = QLabel("Stream Mode")
+        streamTitle.setObjectName("card-title")
+        streamCardLayout.addWidget(streamTitle)
 
-        modeRow = QHBoxLayout()
-        modeRow.setSpacing(6)
-        for mode, label in (("regular", "Regular"), ("depth", "Depth")):
+        streamRow = QHBoxLayout()
+        streamRow.setSpacing(6)
+        for mode, label in (
+            ("stereo_pairs", "Stereo Pairs"),
+            ("stereo_mono", "Stereo-Mono"),
+            ("simulation", "Simulation"),
+        ):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -236,18 +358,217 @@ class VideoStreamingWindow(QWidget):
                 }
                 """
             )
-            btn.clicked.connect(lambda checked, m=mode: self.__setViewMode(m))
-            self.__modeGroup.addButton(btn)
-            self.__modeButtons[mode] = btn
-            modeRow.addWidget(btn)
-        self.__modeButtons[self.__viewMode].setChecked(True)
-        modeRow.addStretch()
-        modeCardLayout.addLayout(modeRow)
-        controlsLayout.addWidget(modeCard)
+            btn.clicked.connect(lambda checked, m=mode: self.__setStreamMode(m))
+            self.__streamModeGroup.addButton(btn)
+            self.__streamModeButtons[mode] = btn
+            streamRow.addWidget(btn)
+        self.__streamModeButtons[self.__streamMode].setChecked(True)
+        streamRow.addStretch()
+        streamCardLayout.addLayout(streamRow)
+        controlsLayout.addWidget(streamCard)
+
+        # Stereo-mono sub-modes
+        stereoMonoCard = QFrame()
+        stereoMonoCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        stereoMonoCardLayout = QVBoxLayout(stereoMonoCard)
+        stereoMonoCardLayout.setContentsMargins(12, 12, 12, 12)
+        stereoMonoCardLayout.setSpacing(8)
+        stereoMonoTitle = QLabel("Stereo-Mono Mode")
+        stereoMonoTitle.setObjectName("card-title")
+        stereoMonoCardLayout.addWidget(stereoMonoTitle)
+
+        stereoMonoRow = QHBoxLayout()
+        stereoMonoRow.setSpacing(6)
+        for mode, label in (
+            ("normal", "Normal"),
+            ("disparity", "Disparity"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(255,255,255,0.06);
+                    color: #e8ecf3;
+                    border: 1px solid rgba(255,255,255,0.12);
+                    border-radius: 10px;
+                    padding: 8px 14px;
+                    font-size: 13px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(0,210,255,0.14);
+                    border: 1px solid rgba(0,210,255,0.32);
+                }
+                QPushButton:checked {
+                    background-color: rgba(0,210,255,0.18);
+                    border: 1px solid rgba(0,210,255,0.65);
+                    color: #0fd3ff;
+                }
+                """
+            )
+            btn.clicked.connect(lambda checked, m=mode: self.__setStereoMonoMode(m))
+            self.__stereoMonoGroup.addButton(btn)
+            self.__stereoMonoButtons[mode] = btn
+            stereoMonoRow.addWidget(btn)
+        self.__stereoMonoButtons[self.__stereoMonoMode].setChecked(True)
+        stereoMonoRow.addStretch()
+        stereoMonoCardLayout.addLayout(stereoMonoRow)
+        controlsLayout.addWidget(stereoMonoCard)
+        self.__stereoMonoCard = stereoMonoCard
+        self.__stereoMonoCard.setVisible(False)
+
+        # Simulation library panel (device videos + local upload controls)
+        simulationCard = QFrame()
+        simulationCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        simulationLayout = QVBoxLayout(simulationCard)
+        simulationLayout.setContentsMargins(12, 12, 12, 12)
+        simulationLayout.setSpacing(10)
+        simulationTitle = QLabel("Simulation Library")
+        simulationTitle.setObjectName("card-title")
+        simulationLayout.addWidget(simulationTitle)
+
+        simulationRow = QHBoxLayout()
+        simulationRow.setSpacing(10)
+        simulationLayout.addLayout(simulationRow)
+
+        deviceCard = QFrame()
+        deviceCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.02);"
+        )
+        deviceLayout = QVBoxLayout(deviceCard)
+        deviceLayout.setContentsMargins(10, 10, 10, 10)
+        deviceLayout.setSpacing(8)
+        deviceTitle = QLabel("Device Videos")
+        deviceTitle.setObjectName("card-title")
+        deviceLayout.addWidget(deviceTitle)
+
+        self.__deviceVideoList = QListWidget()
+        self.__deviceVideoList.setMinimumHeight(160)
+        self.__deviceVideoList.setStyleSheet(
+            """
+            QListWidget {
+                background-color: rgba(5, 8, 13, 0.8);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                padding: 6px;
+            }
+            QListWidget::item {
+                padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(0,210,255,0.18);
+                color: #0fd3ff;
+            }
+            """
+        )
+        self.updateDeviceVideoList([])
+        deviceLayout.addWidget(self.__deviceVideoList)
+        simulationRow.addWidget(deviceCard, stretch=1)
+
+        localCard = QFrame()
+        localCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.02);"
+        )
+        localLayout = QVBoxLayout(localCard)
+        localLayout.setContentsMargins(10, 10, 10, 10)
+        localLayout.setSpacing(8)
+        localTitle = QLabel("Local Upload")
+        localTitle.setObjectName("card-title")
+        localLayout.addWidget(localTitle)
+
+        # Upload controls
+        self.__uploadVideo       = QPushButton("Upload Video")
+        self.__saveIcon          = QIcon("icons/save-icon.svg")
+        if self.__saveIcon.isNull():
+            self.__saveIcon = QIcon("icons/file-manager-icon.svg")
+        self.__saveSnapshotBtn   = IconButton(self.__saveIcon, icon_size=QSize(18, 18))
+        self.__fileLineEdit      = QLineEdit()
+        self.__fileLineEdit.setPlaceholderText("Select a .mov file to stream out")
+        last_path = self.__settings.value("lastFilePath", "", str)
+        if last_path:
+            self.__fileLineEdit.setText(last_path)
+        self.__browseButton      = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(32, 32))
+
+        self.__fileLineEdit.setMinimumWidth(240)
+        self.__fileLineEdit.setMinimumHeight(32)
+        self.__fileLineEdit.setStyleSheet("padding: 6px 10px; font-size: 13px;")
+        self.__browseButton.setIconSize(QSize(32, 32))
+        self.__browseButton.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.1);
+                color: white;
+                font-size: 15px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255,255,255,0.25);
+                padding: 8px 15px; 
+            }
+            QPushButton:pressed {
+                background-color: rgba(255,255,255,0.35);
+            }
+            """
+        )
+
+        uploadRow = QHBoxLayout()
+        uploadRow.setSpacing(8)
+        uploadRow.addWidget(self.__fileLineEdit, stretch=1)
+        uploadRow.addWidget(self.__browseButton)
+        localLayout.addLayout(uploadRow)
+
+        self.__uploadVideo.setFixedHeight(36)
+        self.__uploadVideo.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(0,210,255,0.16);
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.35);
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.24);
+            }
+            """
+        )
+        self.__saveSnapshotBtn.setFixedSize(36, 36)
+        self.__saveSnapshotBtn.setToolTip("Write to device")
+        self.__saveSnapshotBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.06);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            """
+        )
+
+        uploadButtons = QHBoxLayout()
+        uploadButtons.setSpacing(8)
+        uploadButtons.addWidget(self.__uploadVideo)
+        uploadButtons.addWidget(self.__saveSnapshotBtn)
+        uploadButtons.addStretch()
+        localLayout.addLayout(uploadButtons)
+
+        simulationRow.addWidget(localCard, stretch=1)
+
+        self.__simulationCard = simulationCard
+        self.__simulationCard.setVisible(False)
+        controlsLayout.addWidget(simulationCard)
 
         # FPS control
         fpsCard = QFrame()
-        fpsCard.setStyleSheet("border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);")
+        fpsCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
         fpsLayout = QHBoxLayout(fpsCard)
         fpsLayout.setContentsMargins(12, 12, 12, 12)
         fpsLayout.setSpacing(10)
@@ -303,64 +624,10 @@ class VideoStreamingWindow(QWidget):
         fpsLayout.setAlignment(self.__fpsSel, Qt.AlignmentFlag.AlignLeft)
         controlsLayout.addWidget(fpsCard)
 
-        # Upload controls
-        self.__uploadVideo       = QPushButton("Upload Video")
-        self.__fileLineEdit      = QLineEdit()
-        self.__fileLineEdit.setPlaceholderText("Select a .mov file to stream out")
-        last_path = self.__settings.value("lastFilePath", "", str)
-        if last_path:
-            self.__fileLineEdit.setText(last_path)
-        self.__browseButton      = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(32, 32))
-
-        self.__fileLineEdit.setMinimumWidth(360)
-        self.__fileLineEdit.setMinimumHeight(32)
-        self.__fileLineEdit.setStyleSheet("padding: 6px 10px; font-size: 13px;")
-        self.__browseButton.setIconSize(QSize(32, 32))
-        self.__browseButton.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(255,255,255,0.1);
-                color: white;
-                font-size: 15px;
-                border-radius: 6px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255,255,255,0.25);
-                padding: 8px 15px; 
-            }
-            QPushButton:pressed {
-                background-color: rgba(255,255,255,0.35);
-            }
-            """
-        )
-
-        uploadRow = QHBoxLayout()
-        uploadRow.setSpacing(8)
-        uploadRow.addWidget(self.__fileLineEdit, stretch=1)
-        uploadRow.addWidget(self.__browseButton)
-        controlsLayout.addLayout(uploadRow)
-
-        self.__uploadVideo.setFixedHeight(36)
-        self.__uploadVideo.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(0,210,255,0.16);
-                color: #e8ecf3;
-                border: 1px solid rgba(0,210,255,0.35);
-                border-radius: 10px;
-                padding: 8px 14px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: rgba(0,210,255,0.24);
-            }
-            """
-        )
-        controlsLayout.addWidget(self.__uploadVideo)
-        # controlsLayout.addWidget(self.__startStreamOutBtn, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        self.__tabs.addTab(controlsTab, "Stream Controls")
+        self.__tabs.addTab(self.__controlsTab, self.__controlsTabLabel)
+        self.__controlsTabIndex = self.__tabs.indexOf(self.__controlsTab)
+        if self.__controlsTabIndex != -1:
+            self.__tabBar.setTabData(self.__controlsTabIndex, "tearoff")
         
         # Icon playig flag
         self.__isPlaying = False
@@ -380,9 +647,82 @@ class VideoStreamingWindow(QWidget):
         self.__browseButton.clicked.connect(self.__openFileDialog)
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
         self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
+        self.__saveSnapshotBtn.clicked.connect(self.__saveVideoOnDevice)
         
-        # Default view mode
-        self.__setViewMode(self.__viewMode, emit_signal=False)
+        # Default stream mode
+        self.__setStreamMode(self.__streamMode, emit_signal=False)
+        self.__setStereoMonoMode(self.__stereoMonoMode, emit_signal=False)
+
+
+    def __onTearOffRequested(self, index: int, global_pos: QPoint) -> None:
+        if self.__controlsPopout is not None:
+            return
+        if self.__tabs.widget(index) is not self.__controlsTab:
+            return
+        self.__tearOffControls(global_pos)
+
+
+    def __tearOffControls(self, global_pos: QPoint | None = None) -> None:
+        if self.__controlsPopout is not None:
+            self.__controlsPopout.raise_()
+            self.__controlsPopout.activateWindow()
+            return
+
+        if self.__controlsTabIndex is None:
+            self.__controlsTabIndex = self.__tabs.indexOf(self.__controlsTab)
+        if self.__controlsTabIndex != -1:
+            self.__tabs.removeTab(self.__controlsTabIndex)
+
+        self.__controlsPopout = QDialog(self)
+        self.__controlsPopout.setWindowTitle(self.__controlsTabLabel)
+        self.__controlsPopout.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.__controlsPopout.setMinimumSize(520, 360)
+        self.__controlsPopout.setStyleSheet(
+            """
+            QDialog {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            """
+        )
+        if global_pos is not None:
+            self.__controlsPopout.move(global_pos - QPoint(80, 20))
+
+        popoutLayout = QVBoxLayout(self.__controlsPopout)
+        popoutLayout.setContentsMargins(12, 12, 12, 12)
+        popoutLayout.setSpacing(10)
+
+        handle = DockHandle(self.__controlsTabLabel, self.__controlsPopout)
+        popoutLayout.addWidget(handle, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.__controlsTab.setParent(self.__controlsPopout)
+        popoutLayout.addWidget(self.__controlsTab)
+        self.__controlsTab.show()
+        self.__controlsPopout.finished.connect(lambda _=None: self.__dockControls())
+        self.__controlsPopout.show()
+
+
+    def __dockControls(self) -> None:
+        if self.__controlsPopout is None:
+            return
+
+        popout = self.__controlsPopout
+        self.__controlsPopout = None
+
+        layout = popout.layout()
+        if layout is not None:
+            layout.removeWidget(self.__controlsTab)
+        self.__controlsTab.setParent(None)
+
+        if popout.isVisible():
+            popout.close()
+
+        insert_at = self.__controlsTabIndex if self.__controlsTabIndex is not None else self.__tabs.count()
+        if self.__tabs.indexOf(self.__controlsTab) == -1:
+            self.__tabs.insertTab(insert_at, self.__controlsTab, self.__controlsTabLabel)
+        new_index = self.__tabs.indexOf(self.__controlsTab)
+        if new_index != -1:
+            self.__tabBar.setTabData(new_index, "tearoff")
+        self.__tabs.setCurrentWidget(self.__controlsTab)
     
     
     def __uploadVideoClicked(self) -> None:
@@ -397,8 +737,16 @@ class VideoStreamingWindow(QWidget):
         self.__showUploadProgress()
         self.uploadVideoClicked.emit(text)
         # TODO: wire real upload and call updateUploadProgress()/finishUploadProgress()
-        
-        
+
+
+    def __saveVideoOnDevice(self) -> None:
+        """Save the current frame as an image file."""
+        # Extract the name from the path (name only)
+        videoName : str = os.path.basename(self.__fileLineEdit.text())
+        logging.info(f"Saving video on device: {videoName}")
+        self.saveVideoOnDevice.emit(videoName)
+    
+
     def __startStreamOut(self) -> None:
         text = self.__fileLineEdit.text()
         if text == "" or not os.path.isfile(text) or not text.lower().endswith(".mov"):
@@ -435,10 +783,48 @@ class VideoStreamingWindow(QWidget):
             self.__settings.setValue("lastFilePath", filenames[0])
 
 
+    def showErrorMessage(self, message: str) -> None:
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Error")
+        dlg.setIcon(QMessageBox.Icon.Critical)
+        dlg.setText(message)
+        dlg.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            QMessageBox QLabel {
+                color: #e8ecf3;
+            }
+            """
+        )
+        dlg.exec()
+        
+        
+    def showVideoSavedMessage(self) -> None:
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Video Saved")
+        dlg.setIcon(QMessageBox.Icon.Information)
+        dlg.setText("Video saved to device:\n")
+        dlg.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            QMessageBox QLabel {
+                color: #e8ecf3;
+            }
+            """
+        )
+        dlg.exec()
+
+
     # ------------------------------------------------------------------
     # Call this when a new frame arrives (numpy array BGR)
     # ------------------------------------------------------------------
-    def updateFrame(self, frame: np.ndarray):
+    def updateFrame(self, frame: np.ndarray, GyroData:tuple[int, int, int]=None):
         if frame is None:
             return
 
@@ -505,16 +891,36 @@ class VideoStreamingWindow(QWidget):
         self.updateFrame(stacked)
 
 
-    def __setViewMode(self, mode: str, emit_signal: bool = True) -> None:
-        if mode == self.__viewMode:
+    def __setStreamMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode == self.__streamMode:
             return
-        if mode not in self.__modeButtons:
+        if mode not in self.__streamModeButtons:
             return
-        self.__viewMode = mode
-        for key, btn in self.__modeButtons.items():
+        self.__streamMode = mode
+        for key, btn in self.__streamModeButtons.items():
+            btn.setChecked(key == mode)
+        if hasattr(self, "_VideoStreamingWindow__stereoMonoCard"):
+            self.__stereoMonoCard.setVisible(mode == "stereo_mono")
+            if mode == "stereo_mono":
+                self.__setStereoMonoMode(self.__stereoMonoMode, emit_signal=True)
+        if hasattr(self, "_VideoStreamingWindow__simulationCard"):
+            self.__simulationCard.setVisible(mode == "simulation")
+        if emit_signal:
+            self.streamModeChanged.emit(mode)
+
+
+    def __setStereoMonoMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode == self.__stereoMonoMode:
+            if emit_signal:
+                self.stereoMonoModeChanged.emit(mode)
+            return
+        if mode not in self.__stereoMonoButtons:
+            return
+        self.__stereoMonoMode = mode
+        for key, btn in self.__stereoMonoButtons.items():
             btn.setChecked(key == mode)
         if emit_signal:
-            self.viewModeChanged.emit(mode)
+            self.stereoMonoModeChanged.emit(mode)
 
 
     def __showUploadProgress(self):
@@ -574,4 +980,17 @@ class VideoStreamingWindow(QWidget):
             return
         self.__uploadProgress.reset()
         self.__uploadProgress = None
+
+
+    def updateDeviceVideoList(self, video_names: list[str]) -> None:
+        """Update the device video list display."""
+        self.__deviceVideoList.clear()
+        if not video_names:
+            placeholder = QListWidgetItem("No device videos loaded yet")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.__deviceVideoList.addItem(placeholder)
+            return
+        for name in video_names:
+            if name:
+                self.__deviceVideoList.addItem(name)
 
