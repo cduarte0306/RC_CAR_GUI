@@ -62,6 +62,7 @@ class CamCommands(Enum):
     CmdSaveVideo         = auto()
     CmdLoadStoredVideos  = auto()
     CmdLoadSelectedVideo = auto()
+    CmdDeleteVideo       = auto()
     
 
 class CamStreamModes(Enum):
@@ -243,7 +244,7 @@ class CommandBus:
             logging.error("Failed to process reply: %s", exc)
 
 
-    def _build_packet(self, cmd: Command) -> bytes:
+    def _build_packet(self, cmd: Command, seq_id: int) -> bytes:
         """
         Build the command packet to send over UDP
         Args:
@@ -262,7 +263,7 @@ class CommandBus:
         extra_payload = cmd.payload if cmd.payload else b""
         combined_payload = base_payload_bytes + extra_payload
 
-        seq = ctypes.c_uint16(self._seq_id)
+        seq = ctypes.c_uint16(seq_id)
         msg_len = ctypes.c_uint16(len(combined_payload))
         
         requestPayload = clientReq()
@@ -274,7 +275,6 @@ class CommandBus:
         request_bytes = ctypes.string_at(ctypes.addressof(requestPayload), ctypes.sizeof(requestPayload))
         packet_bytes = request_bytes + extra_payload
 
-        self._seq_id += 1
         return packet_bytes
 
 
@@ -292,10 +292,11 @@ class CommandBus:
             seq_id = None
             try:
                 with self._lock:
-                    seq_id = self._seq_id
+                    seq_id = self._seq_id & 0xFFFF
+                    self._seq_id = (seq_id + 1) & 0xFFFF
                     # Track all commands so replies can be matched by sequence id
                     self.__commandSentBank[seq_id] = cmd
-                    packet_bytes = self._build_packet(cmd)
+                    packet_bytes = self._build_packet(cmd, seq_id)
                 ok = self._udp.send(packet_bytes)
                 if not ok:
                     logging.error("CommandBus failed to send command %s", cmd)

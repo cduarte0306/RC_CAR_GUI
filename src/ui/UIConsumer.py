@@ -15,6 +15,7 @@ import re
 import ctypes
 
 from threading import Thread, Event
+import json
 import time
 import logging
 
@@ -40,7 +41,7 @@ class BackendIface(QThread):
     controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
     
     # Status signals
-    videoListLoaded             = pyqtSignal(list)           # Emitted when video list is loaded from device   
+    videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
     videoStoredToDevice         = pyqtSignal()               # Emitted when video is successfully stored on device
     
     # Error signals
@@ -279,6 +280,7 @@ class BackendIface(QThread):
         """
         logging.info("Video transmission ended")
         self.videoUploadFinished.emit()
+        self.__loadStoredVideoList()
         
         
     def __handleStoredVideoListReply(self, reply : Reply):
@@ -293,22 +295,27 @@ class BackendIface(QThread):
             logging.error("Failed to load stored video list; status=%d", status)
             return
         
-        print(reply.payload())
-        
-        # # Parse video names from payload
-        # payload_size = ctypes.sizeof(reply) - ctypes.sizeof(ReplyPayload)
-        # num_videos = payload_size // 64  # assuming each name is 64 bytes
-        # video_names = []
-        
-        # for i in range(num_videos):
-        #     offset = ctypes.sizeof(ReplyPayload) + i * 64
-        #     name_bytes = (ctypes.c_char * 64).from_buffer_copy(ctypes.string_at(ctypes.addressof(reply) + offset, 64))
-        #     name_str = name_bytes.value.decode('utf-8').rstrip('\x00')
-        #     if name_str:
-        #         video_names.append(name_str)
-        
-        # logging.info(f"Loaded stored video list: {video_names}")
-        # self.videoListLoaded.emit(video_names)
+        if not reply.payload():
+            logging.error("Failed to load stored video list; empty payload")
+            return
+
+        try:
+            videoListJson = reply.payload().decode("utf-8").rstrip("\x00")
+            videoListJson = json.loads(videoListJson)
+        except Exception as exc:
+            logging.error("Failed to parse stored video list payload: %s", exc)
+            return
+
+        loadedVideoName = videoListJson.get("loaded-video", "")
+        videoList = videoListJson.get("video-list", [])
+        if isinstance(videoList, str):
+            videoNames = [name for name in videoList.split(";") if name]
+        elif isinstance(videoList, list):
+            videoNames = [name for name in videoList if name]
+        else:
+            videoNames = []
+        logging.info("Loaded stored video list: %s", videoNames)
+        self.videoListLoaded.emit(loadedVideoName, videoNames)
         
         
     def __handleVideoSavedOnDeviceReply(self, reply : Reply):
@@ -326,32 +333,8 @@ class BackendIface(QThread):
         
         logging.info(f"Video successfully saved on device")
         self.videoStoredToDevice.emit()
+        self.__loadStoredVideoList()
         
-
-    def __handleVideoSetNameReply(self, reply : ReplyPayload):
-        """
-        Handles replies from the video name setting command
-
-        Args:
-            reply (ReplyPayload): Reply from host
-        """
-        status = reply.status
-        if not status:
-            logging.error("Failed to set video name on device; status=%d", status)
-            return
-        
-        logging.info(f"Commanding video save")
-        
-        # Build nested CameraCommand payload
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSaveVideo.value  # hypothetical command
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        # Emit camera save video command to the controller bus, with appended payload
-        try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__videoSavedOnDeviceSignal))
-        except Exception as exc:
-            logging.error("Failed to enqueue save video command: %s", exc)
-
 
     def startStreamOut(self, state : bool, fileName:str) -> None:
         print(state, fileName)
@@ -541,7 +524,7 @@ class BackendIface(QThread):
         self.__disconnectTimerObj.start()
         
         # Load the list of stored videos from the device
-        # self.__loadStoredVideoList()
+        self.__loadStoredVideoList()
         
     
     def __loadStoredVideoList(self) -> None:
@@ -555,6 +538,43 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
         except Exception as exc:
             logging.error("Failed to enqueue load stored videos command: %s", exc)
+
+
+    @pyqtSlot(str)
+    def loadDeviceVideo(self, videoName: str) -> None:
+        """Request the device to load a stored video by name."""
+        if not videoName:
+            logging.warning("No device video name provided")
+            return
+
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdLoadSelectedVideo.value
+        cam_cmd.payloadLen = len(videoName)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + videoName.encode("utf-8")
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue load selected video command: %s", exc)
+            
+            
+    @pyqtSlot(str)
+    def deleteDeviceVideo(self, videoName: str) -> None:
+        """Request the device to delete a stored video by name."""
+        if not videoName:
+            logging.warning("No device video name provided")
+            return
+
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdDeleteVideo.value
+        cam_cmd.payloadLen = len(videoName)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + videoName.encode("utf-8")
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
+            self.__loadStoredVideoList()
+        except Exception as exc:
+            logging.error("Failed to enqueue delete video command: %s", exc)
 
 
     def getDevices(self) -> list:

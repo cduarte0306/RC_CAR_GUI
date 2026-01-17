@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
     QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
-    QApplication, QListWidget, QListWidgetItem
+    QApplication, QListWidget, QListWidgetItem, QMenu
 )
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor
 from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData
@@ -205,13 +205,15 @@ class DockHandle(QFrame):
 
 class VideoStreamingWindow(QWidget):
 
-    startStreamOut        = pyqtSignal(bool, str) # File selected signals
-    streamModeChanged     = pyqtSignal(str)       # "stereo_pairs", "stereo_mono", "simulation"
-    stereoMonoModeChanged = pyqtSignal(str)       # "normal", "disparity"
-    uploadVideoClicked    = pyqtSignal(str)       # File selected signal
-    setNormalMode         = pyqtSignal()
-    setDisparityMode      = pyqtSignal()
-    saveVideoOnDevice     = pyqtSignal(str)       # Signal to save video on device
+    startStreamOut             = pyqtSignal(bool, str) # File selected signals
+    streamModeChanged          = pyqtSignal(str)       # "stereo_pairs", "stereo_mono", "simulation"
+    stereoMonoModeChanged      = pyqtSignal(str)       # "normal", "disparity"
+    uploadVideoClicked         = pyqtSignal(str)       # File selected signal
+    deviceVideoLoadRequested   = pyqtSignal(str)       # Device video selection signal
+    deviceVideoDeleteRequested = pyqtSignal(str)       # Device video deletion signal
+    setNormalMode              = pyqtSignal()
+    setDisparityMode           = pyqtSignal()
+    saveVideoOnDevice          = pyqtSignal(str)       # Signal to save video on device
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -445,6 +447,8 @@ class VideoStreamingWindow(QWidget):
 
         self.__deviceVideoList = QListWidget()
         self.__deviceVideoList.setMinimumHeight(160)
+        self.__deviceVideoList.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.__deviceVideoList.customContextMenuRequested.connect(self.__showDeviceVideoMenu)
         self.__deviceVideoList.setStyleSheet(
             """
             QListWidget {
@@ -518,6 +522,11 @@ class VideoStreamingWindow(QWidget):
         uploadRow.addWidget(self.__fileLineEdit, stretch=1)
         uploadRow.addWidget(self.__browseButton)
         localLayout.addLayout(uploadRow)
+
+        self.__activeFileLabel = QLabel("Active file: none")
+        self.__activeFileLabel.setObjectName("muted")
+        self.__activeFileLabel.setStyleSheet("font-size: 12px;")
+        localLayout.addWidget(self.__activeFileLabel)
 
         self.__uploadVideo.setFixedHeight(36)
         self.__uploadVideo.setStyleSheet(
@@ -648,11 +657,44 @@ class VideoStreamingWindow(QWidget):
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
         self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
         self.__saveSnapshotBtn.clicked.connect(self.__saveVideoOnDevice)
+        self.__fileLineEdit.textChanged.connect(self.__updateActiveFileLabel)
         
         # Default stream mode
         self.__setStreamMode(self.__streamMode, emit_signal=False)
         self.__setStereoMonoMode(self.__stereoMonoMode, emit_signal=False)
+        self.__updateActiveFileLabel(self.__fileLineEdit.text())
 
+
+    def __updateActiveFileLabel(self, path: str) -> None:
+        name = os.path.basename(path) if path else ""
+        if not name:
+            self.__activeFileLabel.setText("Active file: none")
+        else:
+            self.__activeFileLabel.setText(f"Active file: {name}")
+
+
+    def __showDeviceVideoMenu(self, pos) -> None:
+        item = self.__deviceVideoList.itemAt(pos)
+        if item is None:
+            return
+        if not item.flags() & Qt.ItemFlag.ItemIsEnabled:
+            return
+        self.__deviceVideoList.setCurrentItem(item)
+        self.__deviceVideoList.setFocus()
+        self.__deviceVideoList.scrollToItem(item)
+        menu = QMenu(self)
+        load_action = menu.addAction("Load video")
+        delete_action = menu.addAction("Delete video")
+        action = menu.exec(self.__deviceVideoList.mapToGlobal(pos))
+        if action == load_action:
+            name = item.text().strip()
+            if name:
+                self.deviceVideoLoadRequested.emit(name)
+        elif action == delete_action:
+            name = item.text().strip()
+            if name:
+                self.deviceVideoDeleteRequested.emit(name)
+            return
 
     def __onTearOffRequested(self, index: int, global_pos: QPoint) -> None:
         if self.__controlsPopout is not None:
@@ -806,7 +848,7 @@ class VideoStreamingWindow(QWidget):
         dlg = QMessageBox(self)
         dlg.setWindowTitle("Video Saved")
         dlg.setIcon(QMessageBox.Icon.Information)
-        dlg.setText("Video saved to device:\n")
+        dlg.setText("Video saved to device.")
         dlg.setStyleSheet(
             """
             QMessageBox {
@@ -819,6 +861,34 @@ class VideoStreamingWindow(QWidget):
             """
         )
         dlg.exec()
+        
+        
+    def updateDeviceVideoList(self, loadedVideoName: str | list[str], video_list: list[str] | None = None) -> None:
+        """Update the device video list and preselect the loaded video when provided."""
+        if video_list is None and isinstance(loadedVideoName, list):
+            loaded_name = ""
+            video_names = loadedVideoName
+        else:
+            loaded_name = loadedVideoName or ""
+            video_names = video_list or []
+
+        self.__deviceVideoList.clear()
+        if not video_names:
+            placeholder = QListWidgetItem("No device videos loaded yet")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.__deviceVideoList.addItem(placeholder)
+            return
+
+        selected_item = None
+        for video_name in video_names:
+            if not video_name:
+                continue
+            item = QListWidgetItem(video_name)
+            self.__deviceVideoList.addItem(item)
+            if loaded_name and video_name == loaded_name:
+                selected_item = item
+        if selected_item is not None:
+            self.__deviceVideoList.setCurrentItem(selected_item)
 
 
     # ------------------------------------------------------------------
@@ -981,16 +1051,4 @@ class VideoStreamingWindow(QWidget):
         self.__uploadProgress.reset()
         self.__uploadProgress = None
 
-
-    def updateDeviceVideoList(self, video_names: list[str]) -> None:
-        """Update the device video list display."""
-        self.__deviceVideoList.clear()
-        if not video_names:
-            placeholder = QListWidgetItem("No device videos loaded yet")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.__deviceVideoList.addItem(placeholder)
-            return
-        for name in video_names:
-            if name:
-                self.__deviceVideoList.addItem(name)
 
