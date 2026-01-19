@@ -3,7 +3,7 @@ from utils.utilities import CircularBuffer
 
 from car_controls.VideoStreaming import VideoStreamer, FrameHeader
 from car_controls.controller import Controller
-from car_controls.CommandBus import (CamCommands, CamStreamModes, 
+from car_controls.CommandBus import (CamCommands, CamStreamSelectionModes,
                                      CommandBus, Command, commands, CameraCommand, ReplyPayload, Reply)
 from network.NetworkManager import NetworkManager
 from network.udp_client import UDP
@@ -98,8 +98,9 @@ class BackendIface(QThread):
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
     
-        # Default to regular camera streaming mode
-        self.setStreamMode("stereo_pairs")
+        # Default to disparity (normal) stereo streaming mode
+        self.setCameraSource(False)
+        self.setStereoMonoMode("disparity")
         
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
@@ -264,7 +265,7 @@ class BackendIface(QThread):
         
         # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdClrVideoRec.value  # CmdSelMode on host
+        cam_cmd.command = CamCommands.CmdClrVideoRec.value  # CmdSelCameraStream on host
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
         # Emit camera mode command to the controller bus, with appended payload
@@ -281,6 +282,25 @@ class BackendIface(QThread):
         logging.info("Video transmission ended")
         self.videoUploadFinished.emit()
         self.__loadStoredVideoList()
+        
+        
+    def __handleCalibParamsReply(self, reply : Reply):
+        """
+        Handles replies from the calibration parameters command
+
+        """
+        
+        # Command the camera to clear the buffer before starting
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value  # CmdSelCameraStream on host
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # cam_payload = cam_payload + videoName.encode("utf-8")
+        # Emit camera mode command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue camera calibration write parameters command: %s", exc)
+        
         
         
     def __handleStoredVideoListReply(self, reply : Reply):
@@ -336,29 +356,6 @@ class BackendIface(QThread):
         self.__loadStoredVideoList()
         
 
-    def startStreamOut(self, state : bool, fileName:str) -> None:
-        print(state, fileName)
-        logging.info(f"Start stream out called with state={state}, fileName={fileName}")
-        streamStateMap = {
-            "streaminoff"  : 0,
-            "streaminon"   : 1,
-            "streamsim"    : 2,
-            "streamcamera" : 3
-        }
-        
-        val : int = streamStateMap["streamsim"]  if state else streamStateMap["streaminoff"]
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = val
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-
-        # Emit camera mode command to the controller bus, with appended payload
-        try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
-        except Exception as exc:
-            logging.error("Failed to enqueue camera mode command: %s", exc)
-        
-
     @pyqtSlot(str)
     def uploadVideoFile(self, fileName: str) -> None:
         """Upload a video file to the car's storage."""
@@ -371,30 +368,41 @@ class BackendIface(QThread):
         logging.info(f"Uploading video file to car: {fileName}")
         # Here you would implement the actual upload logic
         # For now, just log the action
-
-
-    @pyqtSlot(str)
-    def setStreamMode(self, streamMode:str) -> None:
-        """Enable or disable video streaming to the car."""
-        modeMap = {
-            "stereo_pairs": CamStreamModes.StreamStereoPairs.value,
-            "stereo_mono": CamStreamModes.StreamStereoMono.value,
-            "simulation": CamStreamModes.StreamSim.value,
+        
+        
+    @pyqtSlot(bool)
+    def setCameraSource(self, calMode:bool) -> None:
+        """Set the camera source to either simulation or physical camera."""
+        logging.info("Requested camera source mode. calMode=%s", calMode)
+        extraCommand : dict = {
+            "calibration-mode": calMode
         }
         
-        if modeMap.get(streamMode) is None:
-            logging.warning("Unknown stream mode requested: %s", streamMode)
-            return
-        
-        
-        logging.info("Requested stream mode: %s", streamMode)
+        extraCommandPayload = json.dumps(extraCommand).encode("utf-8")
         
         # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdStreamMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = modeMap[streamMode]
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = CamStreamSelectionModes.StreamCameraSource.value
+        cam_cmd.payloadLen = len(extraCommandPayload)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + extraCommandPayload
+        # Emit camera mode command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue camera mode command: %s", exc)
+    
 
+    @pyqtSlot()
+    def setSimulationSource(self) -> None:
+        """Set the camera source to either simulation or physical camera."""
+        logging.info("Requested simulation source mode")
+        
+        # Build nested CameraCommand payload
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = CamStreamSelectionModes.StreamSimSource.value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         # Emit camera mode command to the controller bus, with appended payload
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
@@ -402,59 +410,81 @@ class BackendIface(QThread):
             logging.error("Failed to enqueue camera mode command: %s", exc)
 
 
-    @pyqtSlot(str)
-    def setStereoMonoMode(self, mode: str) -> None:
-        """Set stereo-mono render mode (normal/disparity) on the camera."""
-        mode_map = {
-            "normal": 0,     # CamModeNormal
-            "depth": 1,      # CamModeDepth
-            "disparity": 2,  # CamModeDisparity
-        }
-        if mode not in mode_map:
-            logging.warning("Unknown stereo-mono mode requested: %s", mode)
+    @pyqtSlot(dict)
+    def setStereoCalibrationParams(self, params: dict) -> None:
+        """Apply stereo calibration parameters to the camera (UI stub)."""
+        if not params:
             return
-
+        logging.info("Stereo calibration params requested: %s", params)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value
+        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value
+        cam_cmd.payloadLen = len(json.dumps(params).encode("utf-8"))
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + json.dumps(params).encode("utf-8")
+        # Emit camera save video command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue save video command: %s", exc)
+
+
+    @pyqtSlot(bool)
+    def setCalibrationMode(self, active: bool) -> None:
+        """Start/stop calibration capture mode (UI stub)."""
+        logging.info("Calibration mode toggled: %s", "on" if active else "off")
+        mode_map = {
+            "normal": 0,      # CamModeNormal
+            "disparity": 1,   # CamModeDisparity
+            "calibration": 2  # CamModeCalibration
+        }
+
+        mode = "calibration"
+        logging.info("Setting camera mode to: %s", mode)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value
         cam_cmd.data.u8 = mode_map[mode]
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-
+        # Emit camera save video command to the controller bus, with appended payload
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue stereo-mono mode command: %s", exc)
+            logging.error("Failed to enqueue save video command: %s", exc)
 
 
-    @pyqtSlot(str)
-    def setVideoMode(self, mode: str) -> None:
-        """Switch camera rendering mode (regular/depth/training) and send to car."""
-        mode_lc = (mode or "").lower()
-        mode_map = {
-            "regular": 0,  # CamModeNormal
-            "normal": 0,
-            "depth": 1,    # CamModeDepth
-            "training": 2  # CamModeTraining
-        }
+    @pyqtSlot()
+    def captureCalibrationSample(self) -> None:
+        """Request a calibration sample capture (UI stub)."""
+        logging.info("Calibration capture requested")
 
-        if mode_lc not in mode_map:
-            logging.warning("Unknown camera mode requested: %s", mode)
-            return
+    @pyqtSlot(bool)
+    def setCalibrationPaused(self, paused: bool) -> None:
+        """Pause/resume calibration capture (UI stub)."""
+        logging.info("Calibration paused: %s", "on" if paused else "off")
 
-        value = mode_map[mode_lc]
-        logging.info("Requested video mode: %s (%d)", mode_lc, value)
-        self.videoModeRequested.emit(mode_lc)
+    @pyqtSlot()
+    def abortCalibrationSession(self) -> None:
+        """Abort the current calibration session (UI stub)."""
+        logging.info("Calibration session aborted")
 
-        # Build nested CameraCommand payload
+    @pyqtSlot()
+    def resetCalibrationSamples(self) -> None:
+        """Reset captured calibration samples (UI stub)."""
+        logging.info("Calibration samples reset")
+
+
+    @pyqtSlot()
+    def storeCalibrationResult(self) -> None:
+        """Ask the host to persist the latest calibration results."""
+        logging.info("Calibration result store requested")
+        payload = json.dumps({"action": "store"}).encode("utf-8")
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-
-        # Emit camera mode command to the controller bus, with appended payload
+        cam_cmd.command = CamCommands.CmdCalibrationSave.value
+        cam_cmd.payloadLen = len(payload)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + payload
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue camera mode command: %s", exc)
+            logging.error("Failed to enqueue calibration store command: %s", exc)
 
 
     def setSaveVideoOnDevice(self, videoName: str) -> None:
@@ -477,15 +507,14 @@ class BackendIface(QThread):
         """Set stereo-mono render mode (normal/disparity) on the camera."""
         mode_map = {
             "normal": 0,     # CamModeNormal
-            "depth": 1,      # CamModeDepth
-            "disparity": 2,  # CamModeDisparity
+            "disparity": 1,  # CamModeDisparity
         }
         if mode not in mode_map:
             logging.warning("Unknown stereo-mono mode requested: %s", mode)
             return
 
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value
         cam_cmd.data.u8 = mode_map[mode]
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
 
@@ -525,6 +554,9 @@ class BackendIface(QThread):
         
         # Load the list of stored videos from the device
         self.__loadStoredVideoList()
+        
+        # Select default video mode
+        self.setVideoMode("normal")
         
     
     def __loadStoredVideoList(self) -> None:
@@ -601,7 +633,6 @@ class BackendIface(QThread):
         """
         Main UI interface thread
         """
-        
         while True:
             frame = self.__videoStreamer.getFrameIn()
             if frame is not None:

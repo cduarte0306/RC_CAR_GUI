@@ -53,23 +53,23 @@ class CameraCommand(ctypes.Structure):
     ]
     
 class CamCommands(Enum):
-    CmdSetFrameRate      = 0
-    CmdStartStream       = auto()
-    CmdStopStream        = auto()
-    CmdStreamMode        = auto()
-    CmdSelMode           = auto()
-    CmdClrVideoRec       = auto()
-    CmdSaveVideo         = auto()
-    CmdLoadStoredVideos  = auto()
-    CmdLoadSelectedVideo = auto()
-    CmdDeleteVideo       = auto()
+    CmdSetFrameRate         = 0
+    CmdStartStream          = auto()
+    CmdStopStream           = auto()
+    CmdSelCameraStream      = auto()
+    CmdClrVideoRec          = auto()
+    CmdSaveVideo            = auto()
+    CmdLoadStoredVideos     = auto()
+    CmdLoadSelectedVideo    = auto()
+    CmdDeleteVideo          = auto()
+    CmdCalibrationSetState  = auto()
+    CmdCalibrationWrtParams = auto()
+    CmdCalibrationSave      = auto()
     
 
-class CamStreamModes(Enum):
-    StreamStereoPairs = 0
-    StreamSim         = auto()
-    StreamStereoMono  = auto()
-
+class CamStreamSelectionModes(Enum):
+    StreamCameraSource = 0
+    StreamSimSource    = auto()
 
 class clientReq(ctypes.Structure):
     _pack_ = 1
@@ -95,16 +95,16 @@ class Reply:
         self.__data_i = data_i
         self.__data_f = data_f
         self.__payload = payload
-        
-        
+
+
     def status(self) -> int:
         return self.__status
-    
-    
+
+
     def data_i(self) -> int:
         return self.__data_i
     
-    
+
     def data_f(self) -> float:
         return self.__data_f
     

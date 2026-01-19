@@ -1,3 +1,4 @@
+import json
 from PyQt6.QtCore import (
     QSize, QPropertyAnimation, QRect, QRectF, QEasingCurve, Qt, QTimer, pyqtSignal, QPoint
 )
@@ -647,7 +648,7 @@ class MainWindow(QMainWindow):
         self.__consumer.videoBufferSignal.connect(lambda left_frame, right_frame: self.__streamWindow.updateFrame(left_frame))
         self.__consumer.videoBufferSignalStereo.connect(lambda left_frame, right_frame: self.__streamWindow.updateStereoFrame(left_frame, right_frame))
         self.__consumer.videoBufferSignalStereoMono.connect(lambda frame, gyroData: self.__streamWindow.updateFrame(frame, gyroData))
-        self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
+        self.__consumer.telemetryReceived.connect(lambda raw_payload : self.__routeTlm(raw_payload))
         self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
         self.__consumer.videoUploadFinished.connect(self.__streamWindow.finishUploadProgress)
         self.__consumer.notifyDisconnect.connect(self.__handleDisconnect)
@@ -659,12 +660,55 @@ class MainWindow(QMainWindow):
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
-        self.__streamWindow.streamModeChanged.connect(self.__consumer.setStreamMode)
-        self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
+        self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)
+        self.__streamWindow.simulationSourceSelected.connect(self.__consumer.setSimulationSource)
+        self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
+        # self.__streamWindow.calibrationModeToggled.connect(self.__consumer.setCalibrationMode)
+        self.__streamWindow.calibrationCaptureRequested.connect(self.__consumer.captureCalibrationSample)
+        self.__streamWindow.calibrationPauseToggled.connect(self.__consumer.setCalibrationPaused)
+        self.__streamWindow.calibrationAbortRequested.connect(self.__consumer.abortCalibrationSession)
+        self.__streamWindow.calibrationResetRequested.connect(self.__consumer.resetCalibrationSamples)
+        self.__streamWindow.calibrationStoreRequested.connect(self.__consumer.storeCalibrationResult)
         self.__streamWindow.saveVideoOnDevice.connect(self.__consumer.setSaveVideoOnDevice)
         self.__streamWindow.deviceVideoLoadRequested.connect(self.__consumer.loadDeviceVideo)
         self.__streamWindow.deviceVideoDeleteRequested.connect(self.__consumer.deleteDeviceVideo)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+
+
+    def __routeTlm(self, raw_payload : bytes) -> None:
+        """
+        Route telemetry data to appropriate windows
+        """
+        
+        text = raw_payload.decode("utf-8") if isinstance(raw_payload, (bytes, bytearray)) else str(raw_payload)
+        try:
+            outer = json.loads(text)
+        except json.JSONDecodeError:
+            self.__tlmWindow.updateTelemetry(raw_payload)
+            return
+        if not isinstance(outer, dict):
+            self.__tlmWindow.updateTelemetry(raw_payload)
+            return
+
+        if outer.get("source") == "CamController":
+            payload = outer.get("payload", "")
+            if isinstance(payload, (bytes, bytearray)):
+                payload = payload.decode("utf-8", errors="ignore")
+            data = payload
+            if isinstance(payload, str):
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    data = {"status": payload}
+            count_text = ""
+            status_text = ""
+            if isinstance(data, dict):
+                count_text = data.get("count", "")
+                status_text = data.get("status", "")
+            self.__streamWindow.updateCalibrationStats(count_text, status_text)
+            return
+
+        self.__tlmWindow.updateTelemetry(raw_payload)
 
 
     def __handleDisconnect(self) -> None:
@@ -795,10 +839,6 @@ class MainWindow(QMainWindow):
         self.__streamWindow.updateUploadProgress(percent)
         if sent >= total:
             self.__streamWindow.finishUploadProgress(True)
-
-
-    def __startStreamOut(self, state : bool, fileName : str) -> None:
-        self.__consumer.setStreamMode(state)
 
 
     def __onDiscoveryStart(self) -> None:
