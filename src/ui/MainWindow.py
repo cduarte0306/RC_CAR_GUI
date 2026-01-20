@@ -11,6 +11,7 @@ from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen, QCursor
 
 from ui.TelemetryWindow import VehicleTelemetryWindow
 from ui.VideoStreamingWindow import VideoStreamingWindow
+from ui.VisualizationWindow import VisualizationWindow
 from ui.UIConsumer import BackendIface
 from ui.FirmwareUpdateWindow import FirmwareUpdateWindow
 from ui.theme import make_card
@@ -68,6 +69,7 @@ class SidePanel(QFrame):
     showWelcome     = pyqtSignal()  # Show welcome
     showTlm         = pyqtSignal()  # Show telemetry signal
     showVideoStream = pyqtSignal()  # Show video stream
+    showVisualizer  = pyqtSignal()  # Show 3D visualizer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -125,6 +127,10 @@ class SidePanel(QFrame):
         self.btnVideo.setToolTip("Open video stream")
         self.btnVideo.setIcon(QIcon("icons/video.svg"))
 
+        self.btn3d = GlowButton(" 3D View")
+        self.btn3d.setToolTip("Open 3D visualization")
+        self.btn3d.setIcon(QIcon("icons/rc-car.png"))
+
         self.btnFw    = GlowButton(" Firmware")
         self.btnFw.setIcon(QIcon("icons/upgrade.svg"))
         self.btnFw.setToolTip("Upload Firmware")
@@ -137,6 +143,7 @@ class SidePanel(QFrame):
         layout.addWidget(self.btnWelcome)
         layout.addWidget(self.btnTelem)
         layout.addWidget(self.btnVideo)
+        layout.addWidget(self.btn3d)
         layout.addWidget(self.btnFw)
         layout.addWidget(self.btnGPS)
 
@@ -184,6 +191,7 @@ class SidePanel(QFrame):
         self.btnWelcome.clicked.connect(lambda: self.showWelcome.emit())
         self.btnTelem.clicked.connect(lambda: self.showTlm.emit())
         self.btnVideo.clicked.connect(lambda: self.showVideoStream.emit())
+        self.btn3d.clicked.connect(lambda: self.showVisualizer.emit())
 
     def _applyCompactMode(self, compact: bool) -> None:
         self._header.setVisible(not compact)
@@ -606,6 +614,7 @@ class MainWindow(QMainWindow):
         self.__tlmWindow    = VehicleTelemetryWindow(self)
         self.__streamWindow = VideoStreamingWindow()
         self.__fwWindow     = FirmwareUpdateWindow(self)
+        self.__vizWindow    = VisualizationWindow(self)
 
         # Side panel
         self.side = SidePanel(self)
@@ -638,6 +647,7 @@ class MainWindow(QMainWindow):
         self.side.showWelcome.connect(self.__showWelcome)
         self.side.showTlm.connect(self.__showTlm)
         self.side.showVideoStream.connect(self.__showVideo)
+        self.side.showVisualizer.connect(self.__showVisualizer)
         self.__welcomeWindow.startRequested.connect(self.__onDiscoveryStart)
         # When a device is discovered, show it on the welcome window
         self.__consumer.deviceDiscovered.connect(self.__onDeviceDiscovered)
@@ -881,6 +891,11 @@ class MainWindow(QMainWindow):
 
     def __showVideo(self) -> None:
         self.__setContent(self.__streamWindow)
+
+
+    def __showVisualizer(self) -> None:
+        """Show the 3D visualization window."""
+        self.__setContent(self.__vizWindow)
 
 
 

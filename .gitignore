@@ -1,3 +1,22 @@
 venv/
 *.pyc
 logs/
+
+# C++ Build artifacts
+build/
+python_modules/
+*.pyd
+*.so
+*.dll
+*.obj
+*.o
+*.a
+*.lib
+*.exp
+*.cmake
+CMakeCache.txt
+CMakeFiles/
+
+# IDE
+.vs/
+.vscode/.vs/
