@@ -11,6 +11,7 @@ import os
 import ctypes
 
 from utils.utilities import Signal
+from enum import Enum, auto
 
 
 MAX_UDP_PACKET_SIZE = 65507
@@ -87,9 +88,15 @@ class VideoStreamer:
     """
     PORT = 5000
 
-    frameSentSignal = Signal(int, int)    # Emitted when a frame is sent out
-    startingVideoTransmission = Signal()  # Emitted when video transmission is starting
-    endingVideoTransmission = Signal()    # Emitted when video transmission is ending
+    frameSentSignal           = Signal(int, int) # Emitted when a frame is sent out
+    startingVideoTransmission = Signal()         # Emitted when video transmission is starting
+    endingVideoTransmission   = Signal()         # Emitted when video transmission is ending
+    requestVideoSettings      = Signal(int, int) # Emitted to request video settings from GUI
+    
+    class Decodestatus(Enum):
+        DecodingOK = 0
+        DecodingIncomplete = auto()
+        DecodingError = auto()
 
     def __init__(self, streamInAdapter: UDP = None, streamOutAdapter: UDP = None, path: str = ""):
         self.__cap = None
@@ -265,6 +272,13 @@ class VideoStreamer:
         del cap
 
     def __streamThread(self) -> None:
+        ret : VideoStreamer.Decodestatus
+        frameOkCounter = 0
+        frameErrCounter = 0
+        qualitySetting = 100
+        fpsSetting = 30
+        receivedFrames = 0
+
         while True:
             while self.__streamInBuff.empty():
                 time.sleep(0.0001)
@@ -284,11 +298,36 @@ class VideoStreamer:
             frameSide = frameHdr.frameHeader.frameSide
 
             if frameType == 0:
-                self.assembleMonoFrame(data, frameHdr)
+                ret = self.assembleMonoFrame(data, frameHdr)
             elif frameType == 1:
-                self.assembleStereoFrame(data, frameHdr, frameSide)
+                ret = self.assembleStereoFrame(data, frameHdr, frameSide)
             elif frameType == 2:
-                self.assembleStereoMonoFrame(data, frameHdr)
+                ret = self.assembleStereoMonoFrame(data, frameHdr)
+
+            if ret == VideoStreamer.Decodestatus.DecodingOK:
+                frameOkCounter += 1
+            elif ret == VideoStreamer.Decodestatus.DecodingError:
+                frameErrCounter += 1
+                
+            receivedFrames = frameOkCounter + frameErrCounter
+
+            # If < 50% ratio of errors, request to lower JPEG encoding quality
+            if frameErrCounter == 0:
+                continue
+
+            errRatio : float = (frameOkCounter / frameErrCounter)
+            if errRatio < 50 and receivedFrames >= 100:
+                frameOkCounter = 0
+                frameErrCounter = 0
+                receivedFrames = 0
+                
+                # Lower quality to try to reduce bandwidth
+                qualitySetting -= 10
+                
+                self.requestVideoSettings.emit(qualitySetting, fpsSetting)  # Lower quality, higher compression
+            
+            logging.debug(f"Frame OK: {frameOkCounter}, Frame Errors: {frameErrCounter}")
+
 
     def _update_fps(self) -> str:
         now = time.time()
@@ -303,13 +342,14 @@ class VideoStreamer:
         self.__lastRecvFrameTime = now
         return fps_text
 
-    def assembleMonoFrame(self, data: bytes, header: FrameHeader) -> None:
+    def assembleMonoFrame(self, data: bytes, header: FrameHeader) -> "VideoStreamer.Decodestatus":
         header_size = ctypes.sizeof(FrameHeader)
         seqID = header.metadata.sequenceID
         segID = header.metadata.segmentID
         numSegs = header.metadata.numSegments
         totalLen = header.metadata.totalLength
         segLen = header.metadata.length
+        out_of_order = False
 
         if len(self.__receivedFrameBuff) < totalLen:
             self.__receivedFrameBuff = bytearray(totalLen)
@@ -320,6 +360,7 @@ class VideoStreamer:
                 len(self.__segmentMapMono) < self.__expectedSegmentsMono):
             logging.warning(f"Dropping incomplete mono frame ID {self.__recvFrameIDMono}")
             self.__segmentMapMono.clear()
+            out_of_order = True
 
         if self.__recvFrameIDMono != seqID:
             self.__recvFrameIDMono = seqID
@@ -331,7 +372,7 @@ class VideoStreamer:
         if payload_end > len(data):
             logging.warning("Mono segment payload truncated (seq=%d seg=%d expected=%d have=%d)",
                             seqID, segID, segLen, len(data) - header_size)
-            return
+            return VideoStreamer.Decodestatus.DecodingError
         self.__segmentMapMono[segID] = bytes(data[payload_start:payload_end])
 
         if len(self.__segmentMapMono) == self.__expectedSegmentsMono:
@@ -341,7 +382,7 @@ class VideoStreamer:
                     logging.warning(f"Missing segment {i} for mono frame {self.__recvFrameIDMono}")
                     self.__segmentMapMono.clear()
                     self.__recvFrameIDMono = None
-                    return
+                    return VideoStreamer.Decodestatus.DecodingError
                 jpeg_bytes.extend(self.__segmentMapMono[i])
 
             npbuf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
@@ -355,11 +396,19 @@ class VideoStreamer:
             self.__recvFrameIDMono = None
 
             if frame is None:
-                return
+                return VideoStreamer.Decodestatus.DecodingError
             rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.__frameBufferMono.push(rgbImage)
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if out_of_order
+                    else VideoStreamer.Decodestatus.DecodingOK)
 
-    def assembleStereoFrame(self, data: bytes, header: FrameHeader, side: int) -> None:
+        return (VideoStreamer.Decodestatus.DecodingError
+                if out_of_order
+                else VideoStreamer.Decodestatus.DecodingIncomplete)
+
+
+    def assembleStereoFrame(self, data: bytes, header: FrameHeader, side: int) -> "VideoStreamer.Decodestatus":
         """
         Assemble a stereo frame pair from received segments.
 
@@ -371,15 +420,17 @@ class VideoStreamer:
         numSegs = header.metadata.numSegments
         totalLen = header.metadata.totalLength
         segLen = header.metadata.length
+        out_of_order = False
 
         if (self.__recvFrameIDStereo is not None and
                 seqID != self.__recvFrameIDStereo and
                 (len(self.__segmentMapL) > 0 or len(self.__segmentMapR) > 0)):
-            logging.warning(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereo}")
+            logging.debug(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereo}")
             self.__segmentMapL.clear()
             self.__segmentMapR.clear()
             self.__expectedSegmentsStereoL = 0
             self.__expectedSegmentsStereoR = 0
+            out_of_order = True
 
         if self.__recvFrameIDStereo != seqID:
             self.__recvFrameIDStereo = seqID
@@ -397,6 +448,7 @@ class VideoStreamer:
                                 seqID, self.__expectedSegmentsStereoL, numSegs)
                 self.__segmentMapL.clear()
                 self.__expectedSegmentsStereoL = numSegs
+                out_of_order = True
         else:
             segmentMap = self.__segmentMapR
             if self.__expectedSegmentsStereoR in (0, numSegs):
@@ -406,22 +458,29 @@ class VideoStreamer:
                                 seqID, self.__expectedSegmentsStereoR, numSegs)
                 self.__segmentMapR.clear()
                 self.__expectedSegmentsStereoR = numSegs
+                out_of_order = True
 
         payload_start = header_size
         payload_end = header_size + segLen
         if payload_end > len(data):
             logging.warning("Stereo segment payload truncated (seq=%d seg=%d expected=%d have=%d)",
                             seqID, segID, segLen, len(data) - header_size)
-            return
+            return VideoStreamer.Decodestatus.DecodingError
         segmentMap[segID] = bytes(data[payload_start:payload_end])
 
         # Need both expected counts known and both sides complete.
         if self.__expectedSegmentsStereoL <= 0 or self.__expectedSegmentsStereoR <= 0:
-            return
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if out_of_order
+                    else VideoStreamer.Decodestatus.DecodingIncomplete)
         if len(self.__segmentMapL) != self.__expectedSegmentsStereoL:
-            return
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if out_of_order
+                    else VideoStreamer.Decodestatus.DecodingIncomplete)
         if len(self.__segmentMapR) != self.__expectedSegmentsStereoR:
-            return
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if out_of_order
+                    else VideoStreamer.Decodestatus.DecodingIncomplete)
 
         left_bytes = bytearray()
         right_bytes = bytearray()
@@ -434,7 +493,7 @@ class VideoStreamer:
                 self.__recvFrameIDStereo = None
                 self.__expectedSegmentsStereoL = 0
                 self.__expectedSegmentsStereoR = 0
-                return
+                return VideoStreamer.Decodestatus.DecodingError
             left_bytes.extend(self.__segmentMapL[i])
 
         for i in range(self.__expectedSegmentsStereoR):
@@ -445,7 +504,7 @@ class VideoStreamer:
                 self.__recvFrameIDStereo = None
                 self.__expectedSegmentsStereoL = 0
                 self.__expectedSegmentsStereoR = 0
-                return
+                return VideoStreamer.Decodestatus.DecodingError
             right_bytes.extend(self.__segmentMapR[i])
 
         left_img = cv2.imdecode(np.frombuffer(left_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -458,7 +517,7 @@ class VideoStreamer:
             self.__recvFrameIDStereo = None
             self.__expectedSegmentsStereoL = 0
             self.__expectedSegmentsStereoR = 0
-            return
+            return VideoStreamer.Decodestatus.DecodingError
 
         fps_text = self._update_fps()
         if fps_text:
@@ -478,14 +537,19 @@ class VideoStreamer:
 
         rgbImage = cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB)
         self.__frameBufferStereo.push(rgbImage)
+        return (VideoStreamer.Decodestatus.DecodingError
+                if out_of_order
+                else VideoStreamer.Decodestatus.DecodingOK)
 
-    def assembleStereoMonoFrame(self, data: bytes, header: FrameHeader) -> None:
+
+    def assembleStereoMonoFrame(self, data: bytes, header: FrameHeader) -> "VideoStreamer.Decodestatus":
         header_size = ctypes.sizeof(FrameHeader)
         seqID = header.metadata.sequenceID
         segID = header.metadata.segmentID
         numSegs = header.metadata.numSegments
         totalLen = header.metadata.totalLength
         segLen = header.metadata.length
+        out_of_order = False
 
         if len(self.__receivedFrameBuff) < totalLen:
             self.__receivedFrameBuff = bytearray(totalLen)
@@ -493,8 +557,9 @@ class VideoStreamer:
         if (self.__recvFrameIDStereoMono is not None and
                 seqID != self.__recvFrameIDStereoMono and
                 (len(self.__segmentMapStereoMono) > 0)):
-            logging.warning(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereoMono}")
+            logging.debug(f"Dropping incomplete stereo frame ID {self.__recvFrameIDStereoMono}")
             self.__segmentMapStereoMono.clear()
+            out_of_order = True
 
         if self.__recvFrameIDStereoMono != seqID:
             self.__recvFrameIDStereoMono = seqID
@@ -506,7 +571,7 @@ class VideoStreamer:
         if payload_end > len(data):
             logging.warning("Stereo segment payload truncated (seq=%d seg=%d expected=%d have=%d)",
                             seqID, segID, segLen, len(data) - header_size)
-            return
+            return VideoStreamer.Decodestatus.DecodingError
         self.__segmentMapStereoMono[segID] = bytes(data[payload_start:payload_end])
 
         if len(self.__segmentMapStereoMono) == self.__expectedSegmentsStereoMono:
@@ -516,7 +581,7 @@ class VideoStreamer:
                     logging.warning(f"Missing segment {i} for stereo frame {self.__recvFrameIDStereoMono}")
                     self.__segmentMapStereoMono.clear()
                     self.__recvFrameIDStereoMono = None
-                    return
+                    return VideoStreamer.Decodestatus.DecodingError
                 imgBytes.extend(self.__segmentMapStereoMono[i])
 
             gyro_data = GyroData.from_buffer_copy(imgBytes)
@@ -527,7 +592,7 @@ class VideoStreamer:
                 logging.warning("Failed to decode stereo-mono image for frame %s", self.__recvFrameIDStereoMono)
                 self.__segmentMapStereoMono.clear()
                 self.__recvFrameIDStereoMono = None
-                return
+                return VideoStreamer.Decodestatus.DecodingError
 
             fps_text = self._update_fps()
             if fps_text:
@@ -538,4 +603,10 @@ class VideoStreamer:
 
             rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self.__frameBufferStereoMono.push((rgbImage, (gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ)))
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if out_of_order
+                    else VideoStreamer.Decodestatus.DecodingOK)
+        return (VideoStreamer.Decodestatus.DecodingError
+                if out_of_order
+                else VideoStreamer.Decodestatus.DecodingIncomplete)
 

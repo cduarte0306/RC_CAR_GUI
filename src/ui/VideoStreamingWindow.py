@@ -852,6 +852,7 @@ class VideoStreamingWindow(QWidget):
             }
             """
         )
+        self.__calibModeBtn.setVisible(False)
         self.__calibCaptureBtn = QPushButton("Perform Capture")
         self.__calibCaptureBtn.setStyleSheet(
             """
@@ -877,6 +878,7 @@ class VideoStreamingWindow(QWidget):
         self.__calibPauseBtn.setStyleSheet(button_style)
         self.__calibPauseBtn.setToolTip("Pause calibration capture")
         self.__calibPauseBtn.setEnabled(False)
+        self.__calibPauseBtn.setVisible(False)
 
         self.__calibSendParamsBtn = QPushButton("Send Settings")
         self.__calibSendParamsBtn.setStyleSheet(button_style)
@@ -902,6 +904,7 @@ class VideoStreamingWindow(QWidget):
         )
         self.__calibAbortBtn.setToolTip("Abort calibration session")
         self.__calibAbortBtn.setEnabled(False)
+        self.__calibAbortBtn.setVisible(False)
 
         self.__calibResetBtn = QPushButton("Reset Samples")
         self.__calibResetBtn.setStyleSheet(button_style)
@@ -1256,10 +1259,10 @@ class VideoStreamingWindow(QWidget):
             if self.__calibPauseBtn.isChecked():
                 self.__calibPauseBtn.setChecked(False)
                 self.__toggleCalibrationPause()
-        self.__calibCaptureBtn.setVisible(active)
-        self.__calibPauseBtn.setEnabled(active)
+        self.__calibCaptureBtn.setVisible(False)
+        self.__calibPauseBtn.setEnabled(False)
         self.__calibResetBtn.setEnabled(active)
-        self.__calibAbortBtn.setEnabled(active)
+        self.__calibAbortBtn.setEnabled(False)
         if emit_signal:
             self.calibrationModeToggled.emit(active)
         self.__resizeControlsPopout()
@@ -1507,8 +1510,12 @@ class VideoStreamingWindow(QWidget):
 
 
     def __loadCalibrationProfile(self) -> None:
-        name = self.__calibProfileCombo.currentText().strip()
-        if not name or name not in self.__calibProfiles:
+        name = self.__calibProfileName.text().strip() or self.__calibProfileCombo.currentText().strip()
+        if not name:
+            self.showErrorMessage("Select or enter a profile name to load.")
+            return
+        if name not in self.__calibProfiles:
+            self.showErrorMessage(f"No saved profile named '{name}'.")
             return
         self.__applyCalibrationParams(self.__calibProfiles[name])
         self.__settings.setValue("calibrationLastProfile", name)

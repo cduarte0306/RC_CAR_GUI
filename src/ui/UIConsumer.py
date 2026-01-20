@@ -92,6 +92,7 @@ class BackendIface(QThread):
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
+        self.__videoStreamer.requestVideoSettings.connect(self.__setVideoSettings)
         self.__commandBus.replyReceived.connect(lambda reply: self.commandReplyReceived.emit(ctypes.string_at(ctypes.addressof(reply), ctypes.sizeof(reply))))
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
@@ -101,7 +102,7 @@ class BackendIface(QThread):
         # Default to disparity (normal) stereo streaming mode
         self.setCameraSource(False)
         self.setStereoMonoMode("disparity")
-        
+        self.__setVideoSettings(100, 30)
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
         # Ping thread
@@ -273,6 +274,17 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+            
+            
+    def __setVideoSettings(self, quality: int, fps: int) -> None:
+        """
+        Set video settings on the camera
+
+        Args:
+            quality (int): _description_
+            fps (int): _description_
+        """
+        
     
     
     def __endingVideoTransmission(self) -> None:
