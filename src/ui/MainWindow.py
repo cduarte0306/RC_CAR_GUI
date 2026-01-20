@@ -1,3 +1,4 @@
+import json
 from PyQt6.QtCore import (
     QSize, QPropertyAnimation, QRect, QRectF, QEasingCurve, Qt, QTimer, pyqtSignal, QPoint
 )
@@ -22,6 +23,7 @@ class GlowButton(QPushButton):
 
     def __init__(self, text):
         super().__init__(text)
+        self._full_text = text
         self.setFixedHeight(46)
         self.setIconSize(QSize(22, 22))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -36,6 +38,10 @@ class GlowButton(QPushButton):
                 padding-left: 14px;
                 text-align: left;
             }
+            QPushButton[compact="true"] {
+                padding-left: 0px;
+                text-align: center;
+            }
             QPushButton:hover {
                 background-color: rgba(0,210,255,0.16);
                 border: 1px solid rgba(0,210,255,0.35);
@@ -44,11 +50,20 @@ class GlowButton(QPushButton):
                 background-color: rgba(0,210,255,0.24);
             }
         """)
+        self.setCompactMode(False)
+
+    def setCompactMode(self, compact: bool) -> None:
+        if self.property("compact") == compact:
+            return
+        self.setProperty("compact", compact)
+        self.setText("" if compact else self._full_text)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class SidePanel(QFrame):
-    PANEL_WIDTH = 210
-    PEEK = 12    # show a subtle grab area when closed
+    EXPANDED_WIDTH = 210
+    COLLAPSED_WIDTH = 64
 
     # Signals
     showWelcome     = pyqtSignal()  # Show welcome
@@ -59,7 +74,8 @@ class SidePanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setFixedWidth(self.PANEL_WIDTH)
+        self.setMinimumWidth(self.COLLAPSED_WIDTH)
+        self.setMaximumWidth(self.EXPANDED_WIDTH)
         self.setStyleSheet("""
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -81,6 +97,7 @@ class SidePanel(QFrame):
 
         self.hidden = True
         self.pinned = False
+        self._expanded = False
 
         # ----------------------
         # Layout & Widgets
@@ -91,10 +108,10 @@ class SidePanel(QFrame):
         self.setLayout(layout)
 
         # Header
-        header = QLabel("Quick Nav")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setStyleSheet("color: #e8ecf3; font-size: 18px; font-weight: 700;")
-        layout.addWidget(header)
+        self._header = QLabel("Quick Nav")
+        self._header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._header.setStyleSheet("color: #e8ecf3; font-size: 18px; font-weight: 700;")
+        layout.addWidget(self._header)
 
         # Buttons
         # Welcome window button
@@ -119,7 +136,8 @@ class SidePanel(QFrame):
         self.btnFw.setToolTip("Upload Firmware")
         self.btnFw.setIconSize(QSize(24, 24))
 
-        self.btnGPS = GlowButton("GPS")
+        self.btnGPS = GlowButton(" GPS")
+        self.btnGPS.setIcon(QIcon("icons/gps.svg"))
         self.btnGPS.setToolTip("GPS Position")
 
         layout.addWidget(self.btnWelcome)
@@ -130,6 +148,14 @@ class SidePanel(QFrame):
         layout.addWidget(self.btnGPS)
 
         layout.addStretch()
+
+        self._buttons = [
+            self.btnWelcome,
+            self.btnTelem,
+            self.btnVideo,
+            self.btnFw,
+            self.btnGPS,
+        ]
 
         # Pin button row
         pinRow = QHBoxLayout()
@@ -152,6 +178,7 @@ class SidePanel(QFrame):
 
         pinRow.addWidget(self.pinButton)
         self.setMouseTracking(True)
+        self._applyCompactMode(True)
         
         # Connect all signals
         self.__connectSignals()
@@ -166,34 +193,48 @@ class SidePanel(QFrame):
         self.btnVideo.clicked.connect(lambda: self.showVideoStream.emit())
         self.btn3d.clicked.connect(lambda: self.showVisualizer.emit())
 
+    def _applyCompactMode(self, compact: bool) -> None:
+        self._header.setVisible(not compact)
+        for btn in self._buttons:
+            btn.setCompactMode(compact)
+        if hasattr(self, "pinButton"):
+            self.pinButton.setVisible(False)
+        layout = self.layout()
+        if layout is not None:
+            if compact:
+                layout.setContentsMargins(8, 12, 8, 12)
+                layout.setSpacing(8)
+            else:
+                layout.setContentsMargins(12, 12, 12, 12)
+                layout.setSpacing(10)
+
+    def _animateWidth(self, target_width: int) -> None:
+        h = self.parent().height() if self.parent() else self.height()
+        self.__anim.stop()
+        self.__anim.setStartValue(QRect(0, 0, self.width(), h))
+        self.__anim.setEndValue(QRect(0, 0, target_width, h))
+        self.__anim.start()
+
 
     # ----------------------------
     # Slide Animations
     # ----------------------------
     def slideIn(self):
-        if not self.hidden:
+        if self._expanded:
             return
+        self._expanded = True
         self.hidden = False
-        h = self.parent().height()
-
-        self.__anim.stop()
-        self.__anim.setStartValue(QRect(-self.PANEL_WIDTH + self.PEEK, 0,
-                                        self.PANEL_WIDTH, h))
-        self.__anim.setEndValue(QRect(0, 0, self.PANEL_WIDTH, h))
-        self.__anim.start()
+        self._applyCompactMode(False)
+        self._animateWidth(self.EXPANDED_WIDTH)
 
 
     def slideOut(self):
-        if self.hidden or self.pinned:
+        if not self._expanded or self.pinned:
             return
+        self._expanded = False
         self.hidden = True
-        h = self.parent().height()
-
-        self.__anim.stop()
-        self.__anim.setStartValue(QRect(0, 0, self.PANEL_WIDTH, h))
-        self.__anim.setEndValue(QRect(-self.PANEL_WIDTH + self.PEEK, 0,
-                        self.PANEL_WIDTH, h))
-        self.__anim.start() 
+        self._applyCompactMode(True)
+        self._animateWidth(self.COLLAPSED_WIDTH)
 
     # ----------------------------
     # Pinning logic
@@ -221,6 +262,16 @@ class SidePanel(QFrame):
             self.autoHideTimer.stop()
 
             
+    def enterEvent(self, event):  # noqa: N802
+        self.autoHideTimer.stop()
+        self.slideIn()
+        super().enterEvent(event)
+
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.startAutoHide()
+        super().leaveEvent(event)
+
 class ClickableLabel(QLabel):
     """A QLabel that behaves like a transparent icon button (clickable)."""
     def __init__(self, pixmap, tooltip:str = "", callback=None, parent=None):
@@ -370,7 +421,7 @@ class WelcomeWindow(QWidget):
         # Avoid duplicates
         for i in range(self._devices_layout.count()):
             w = self._devices_layout.itemAt(i).widget()
-            if w and getattr(w, "deviceTooltip", None) == deviceTooltip:
+            if w and getattr(w, "_deviceTooltip", None) == deviceTooltip:
                 return
 
         # Use a ClickableLabel to avoid button chrome and background artifacts
@@ -381,6 +432,7 @@ class WelcomeWindow(QWidget):
 
         lbl = ClickableLabel(icon, tooltip=f"{deviceTooltip}\nClick to connect", callback=connect_callback)
         lbl._deviceTooltip = deviceTooltip
+        lbl._device_ip = deviceTooltip
         lbl.setFixedSize(72, 72)
         lbl.setScaledContents(True)
         self._devices_layout.addWidget(lbl)
@@ -499,7 +551,7 @@ class MainWindow(QMainWindow):
         # Central UI
         self.central = QWidget()
         centralLayout = QVBoxLayout()
-        centralLayout.setContentsMargins(24, 24, 24, 24)
+        centralLayout.setContentsMargins(24 + SidePanel.COLLAPSED_WIDTH, 24, 24, 24)
         centralLayout.setSpacing(14)
 
         headerRow = QGridLayout()
@@ -542,6 +594,7 @@ class MainWindow(QMainWindow):
 
         self.contentFrame = QFrame()
         make_card(self.contentFrame)
+        self.contentFrame.setProperty("role", "main")
         self.__contentLayout = QVBoxLayout()
         self.__contentLayout.setContentsMargins(18, 18, 18, 18)
         self.__contentLayout.setSpacing(12)
@@ -565,10 +618,8 @@ class MainWindow(QMainWindow):
 
         # Side panel
         self.side = SidePanel(self)
-        self.side.setGeometry(-SidePanel.PANEL_WIDTH + SidePanel.PEEK, 0,
-                    SidePanel.PANEL_WIDTH, self.height())
+        self.side.setGeometry(0, 0, SidePanel.COLLAPSED_WIDTH, self.height())
         self.side.raise_()
-        self.side.hidden = True
         
         # import UI consumer
         self.__consumer = BackendIface()
@@ -606,18 +657,68 @@ class MainWindow(QMainWindow):
         
         self.__consumer.videoBufferSignal.connect(lambda left_frame, right_frame: self.__streamWindow.updateFrame(left_frame))
         self.__consumer.videoBufferSignalStereo.connect(lambda left_frame, right_frame: self.__streamWindow.updateStereoFrame(left_frame, right_frame))
-        self.__consumer.telemetryReceived.connect(lambda tlm : self.__tlmWindow.updateTelemetry(tlm))
+        self.__consumer.videoBufferSignalStereoMono.connect(lambda frame, gyroData: self.__streamWindow.updateFrame(frame, gyroData))
+        self.__consumer.telemetryReceived.connect(lambda raw_payload : self.__routeTlm(raw_payload))
         self.__consumer.videoUploadProgress.connect(self.__updateVideoUploadProgress)
         self.__consumer.videoUploadFinished.connect(self.__streamWindow.finishUploadProgress)
         self.__consumer.notifyDisconnect.connect(self.__handleDisconnect)
         self.__consumer.controllerConnected.connect(self.__onControllerConnected)
         self.__consumer.controllerBatteryLevel.connect(self.__onControllerBatteryLevel)
         self.__consumer.controllerDisconnected.connect(self.__onControllerDisconnected)
+        self.__consumer.failedToStoreVideoOnDevice.connect(self.__streamWindow.showErrorMessage)
+        self.__consumer.videoStoredToDevice.connect(self.__streamWindow.showVideoSavedMessage)
+        self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         
-        self.__streamWindow.startStreamOut.connect(lambda state, fileName : self.__consumer.setStreamMode(state))
-        self.__streamWindow.viewModeChanged.connect(self.__consumer.setVideoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
+        self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)
+        self.__streamWindow.simulationSourceSelected.connect(self.__consumer.setSimulationSource)
+        self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
+        # self.__streamWindow.calibrationModeToggled.connect(self.__consumer.setCalibrationMode)
+        self.__streamWindow.calibrationCaptureRequested.connect(self.__consumer.captureCalibrationSample)
+        self.__streamWindow.calibrationPauseToggled.connect(self.__consumer.setCalibrationPaused)
+        self.__streamWindow.calibrationAbortRequested.connect(self.__consumer.abortCalibrationSession)
+        self.__streamWindow.calibrationResetRequested.connect(self.__consumer.resetCalibrationSamples)
+        self.__streamWindow.calibrationStoreRequested.connect(self.__consumer.storeCalibrationResult)
+        self.__streamWindow.saveVideoOnDevice.connect(self.__consumer.setSaveVideoOnDevice)
+        self.__streamWindow.deviceVideoLoadRequested.connect(self.__consumer.loadDeviceVideo)
+        self.__streamWindow.deviceVideoDeleteRequested.connect(self.__consumer.deleteDeviceVideo)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+
+
+    def __routeTlm(self, raw_payload : bytes) -> None:
+        """
+        Route telemetry data to appropriate windows
+        """
+        
+        text = raw_payload.decode("utf-8") if isinstance(raw_payload, (bytes, bytearray)) else str(raw_payload)
+        try:
+            outer = json.loads(text)
+        except json.JSONDecodeError:
+            self.__tlmWindow.updateTelemetry(raw_payload)
+            return
+        if not isinstance(outer, dict):
+            self.__tlmWindow.updateTelemetry(raw_payload)
+            return
+
+        if outer.get("source") == "CamController":
+            payload = outer.get("payload", "")
+            if isinstance(payload, (bytes, bytearray)):
+                payload = payload.decode("utf-8", errors="ignore")
+            data = payload
+            if isinstance(payload, str):
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    data = {"status": payload}
+            count_text = ""
+            status_text = ""
+            if isinstance(data, dict):
+                count_text = data.get("count", "")
+                status_text = data.get("status", "")
+            self.__streamWindow.updateCalibrationStats(count_text, status_text)
+            return
+
+        self.__tlmWindow.updateTelemetry(raw_payload)
 
 
     def __handleDisconnect(self) -> None:
@@ -750,10 +851,6 @@ class MainWindow(QMainWindow):
             self.__streamWindow.finishUploadProgress(True)
 
 
-    def __startStreamOut(self, state : bool, fileName : str) -> None:
-        self.__consumer.setStreamMode(state)
-
-
     def __onDiscoveryStart(self) -> None:
         """Begin discovery and reflect state in the UI header chip."""
         self.__setStatusChip("Discovering devices", "discovering")
@@ -826,10 +923,3 @@ class MainWindow(QMainWindow):
 
 
 
-    def mouseMoveEvent(self, event):
-        x = event.position().x()
-
-        if x < 20:
-            self.side.slideIn()
-        elif x > SidePanel.PANEL_WIDTH + 40:
-            self.side.startAutoHide()

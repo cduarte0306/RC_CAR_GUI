@@ -1,11 +1,14 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
-    QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox
+    QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
+    QApplication, QListWidget, QListWidgetItem, QMenu, QSpinBox, QDoubleSpinBox,
+    QFormLayout, QScrollArea, QCheckBox
 )
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon
-from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor
+from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData
 import numpy as np
 import os
+import json
 
 os.environ["QT_LOGGING_RULES"] = "*.debug=false; *.warning=false"
 
@@ -66,11 +69,165 @@ class IconButton(QPushButton):
         self.setIconSize(self._base_icon_size)
 
 
+class TearOffTabBar(QTabBar):
+    tearOffRequested = pyqtSignal(int, QPoint)
+    dockRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start = None
+        self._drag_index = -1
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            self._drag_index = self.tabAt(self._drag_start)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start is not None
+            and self._drag_index != -1
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            tab_id = self.tabData(self._drag_index)
+            if not tab_id:
+                super().mouseMoveEvent(event)
+                return
+            distance = (event.pos() - self._drag_start).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData("application/x-rc-controls-tab", str(tab_id).encode("utf-8"))
+                drag.setMimeData(mime)
+
+                tab_rect = self.tabRect(self._drag_index)
+                pix = self.grab(tab_rect)
+                if not pix.isNull():
+                    drag.setPixmap(pix)
+                    drag.setHotSpot(event.pos() - tab_rect.topLeft())
+
+                result = drag.exec(Qt.DropAction.MoveAction)
+                if result == Qt.DropAction.IgnoreAction:
+                    self.tearOffRequested.emit(self._drag_index, QCursor.pos())
+                    if self.window():
+                        self.window().activateWindow()
+                        self.window().raise_()
+                self._drag_start = None
+                self._drag_index = -1
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self._drag_index = -1
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-rc-controls-tab"):
+            event.acceptProposedAction()
+            raw = bytes(event.mimeData().data("application/x-rc-controls-tab"))
+            tab_id = raw.decode("utf-8") if raw else ""
+            self.dockRequested.emit(tab_id)
+            return
+        super().dropEvent(event)
+
+
+class DockHandle(QFrame):
+    """Draggable tab handle to dock the torn-off controls back into the tab bar."""
+
+    def __init__(self, label: str, tab_id: str, parent=None):
+        super().__init__(parent)
+        self._label = QLabel(label, self)
+        self._label.setObjectName("dock-handle-title")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._drag_start: QPoint | None = None
+        self._tab_id = tab_id
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.addWidget(self._label)
+
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setStyleSheet(
+            """
+            QFrame {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+            }
+            QLabel#dock-handle-title {
+                color: #e8ecf3;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            """
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            distance = (event.pos() - self._drag_start).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData("application/x-rc-controls-tab", self._tab_id.encode("utf-8"))
+                drag.setMimeData(mime)
+                drag.setHotSpot(event.pos())
+
+                pix = self.grab()
+                if not pix.isNull():
+                    drag.setPixmap(pix)
+                drag.exec(Qt.DropAction.MoveAction)
+                self._drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+
 class VideoStreamingWindow(QWidget):
 
-    startStreamOut     = pyqtSignal(bool, str) # File selected signals
-    viewModeChanged    = pyqtSignal(str)       # "regular" or "depth"
-    uploadVideoClicked = pyqtSignal(str)       # File selected signal
+    startStreamOut             = pyqtSignal(bool, str) # File selected signals
+    cameraSourceSelected       = pyqtSignal(bool)      # calibration mode on/off for camera source
+    simulationSourceSelected   = pyqtSignal()          # request simulation source
+    stereoMonoModeChanged      = pyqtSignal(str)       # "normal", "disparity"
+    uploadVideoClicked         = pyqtSignal(str)       # File selected signal
+    deviceVideoLoadRequested   = pyqtSignal(str)       # Device video selection signal
+    deviceVideoDeleteRequested = pyqtSignal(str)       # Device video deletion signal
+    setNormalMode              = pyqtSignal()
+    setDisparityMode           = pyqtSignal()
+    saveVideoOnDevice          = pyqtSignal(str)       # Signal to save video on device
+    stereoCalibrationApplyRequested = pyqtSignal(dict)  # Apply calibration parameters to camera
+    calibrationModeToggled     = pyqtSignal(bool)      # Start/stop calibration mode
+    calibrationCaptureRequested = pyqtSignal()         # Capture a calibration sample
+    calibrationPauseToggled    = pyqtSignal(bool)      # Pause/resume calibration capture
+    calibrationAbortRequested  = pyqtSignal()          # Abort calibration session
+    calibrationResetRequested  = pyqtSignal()          # Reset captured samples
+    calibrationStoreRequested  = pyqtSignal()          # Store current calibration results on host
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -93,49 +250,22 @@ class VideoStreamingWindow(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        self.__viewMode = "regular"
-        self.__modeButtons: dict[str, QPushButton] = {}
-        self.__modeGroup = QButtonGroup(self)
-        self.__modeGroup.setExclusive(True)
-
-        modeRow = QHBoxLayout()
-        modeRow.setSpacing(6)
-        for mode, label in (("regular", "Regular"), ("depth", "Depth")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: rgba(255,255,255,0.06);
-                    color: #e8ecf3;
-                    border: 1px solid rgba(255,255,255,0.12);
-                    border-radius: 10px;
-                    padding: 8px 14px;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(0,210,255,0.14);
-                    border: 1px solid rgba(0,210,255,0.32);
-                }
-                QPushButton:checked {
-                    background-color: rgba(0,210,255,0.18);
-                    border: 1px solid rgba(0,210,255,0.65);
-                    color: #0fd3ff;
-                }
-                """
-            )
-            btn.clicked.connect(lambda checked, m=mode: self.__setViewMode(m))
-            self.__modeGroup.addButton(btn)
-            self.__modeButtons[mode] = btn
-            modeRow.addWidget(btn)
-
-        self.__modeButtons[self.__viewMode].setChecked(True)
-        header.addLayout(modeRow)
+        self.__streamMode = "stereo"
+        self.__streamModeButtons: dict[str, QPushButton] = {}
+        self.__streamModeGroup = QButtonGroup(self)
+        self.__streamModeGroup.setExclusive(True)
+        self.__stereoMonoMode = "normal"
+        self.__stereoMonoButtons: dict[str, QPushButton] = {}
+        self.__stereoMonoGroup = QButtonGroup(self)
+        self.__stereoMonoGroup.setExclusive(True)
         root.addLayout(header)
 
         # Tabs
         self.__tabs = QTabWidget()
+        self.__tabBar = TearOffTabBar(self.__tabs)
+        self.__tabBar.tearOffRequested.connect(self.__onTearOffRequested)
+        self.__tabBar.dockRequested.connect(self.__dockFromHandle)
+        self.__tabs.setTabBar(self.__tabBar)
         self.__tabs.setTabBarAutoHide(False)
         self.__tabs.setStyleSheet(
             """
@@ -194,24 +324,31 @@ class VideoStreamingWindow(QWidget):
 
         # Controls tab
         controlsTab = QWidget()
+        self.__controlsTab = controlsTab
+        self.__controlsTabLabel = "Stream Controls"
+        self.__controlsPopout: QDialog | None = None
+        self.__controlsTabIndex: int | None = None
         controlsLayout = QVBoxLayout()
         controlsLayout.setContentsMargins(8, 8, 8, 8)
         controlsLayout.setSpacing(12)
         controlsTab.setLayout(controlsLayout)
 
-        # Mode buttons (Regular/Depth)
-        modeCard = QFrame()
-        modeCard.setStyleSheet("border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);")
-        modeCardLayout = QVBoxLayout(modeCard)
-        modeCardLayout.setContentsMargins(12, 12, 12, 12)
-        modeCardLayout.setSpacing(8)
-        modeTitle = QLabel("View Mode")
-        modeTitle.setObjectName("card-title")
-        modeCardLayout.addWidget(modeTitle)
+        # Stream mode buttons (Stereo/Training)
+        streamCard = QFrame()
+        streamCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        streamCardLayout = QVBoxLayout(streamCard)
+        streamCardLayout.setContentsMargins(12, 12, 12, 12)
+        streamCardLayout.setSpacing(8)
+        streamTitle = QLabel("Stream Mode")
+        streamTitle.setObjectName("card-title")
+        streamCardLayout.addWidget(streamTitle)
 
-        modeRow = QHBoxLayout()
-        modeRow.setSpacing(6)
-        for mode, label in (("regular", "Regular"), ("depth", "Depth")):
+        streamRow = QHBoxLayout()
+        streamRow.setSpacing(6)
+        for mode, label in (
+            ("stereo", "Stereo"),
+            ("training", "Training"),
+        ):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -236,18 +373,228 @@ class VideoStreamingWindow(QWidget):
                 }
                 """
             )
-            btn.clicked.connect(lambda checked, m=mode: self.__setViewMode(m))
-            self.__modeGroup.addButton(btn)
-            self.__modeButtons[mode] = btn
-            modeRow.addWidget(btn)
-        self.__modeButtons[self.__viewMode].setChecked(True)
-        modeRow.addStretch()
-        modeCardLayout.addLayout(modeRow)
-        controlsLayout.addWidget(modeCard)
+            btn.clicked.connect(lambda checked, m=mode: self.__setStreamMode(m))
+            self.__streamModeGroup.addButton(btn)
+            self.__streamModeButtons[mode] = btn
+            streamRow.addWidget(btn)
+        self.__streamModeButtons[self.__streamMode].setChecked(True)
+        streamRow.addStretch()
+        streamCardLayout.addLayout(streamRow)
+        controlsLayout.addWidget(streamCard)
+
+        # Stereo sub-modes
+        stereoMonoCard = QFrame()
+        stereoMonoCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        stereoMonoCardLayout = QVBoxLayout(stereoMonoCard)
+        stereoMonoCardLayout.setContentsMargins(12, 12, 12, 12)
+        stereoMonoCardLayout.setSpacing(8)
+        stereoMonoTitle = QLabel("Stereo Mode")
+        stereoMonoTitle.setObjectName("card-title")
+        stereoMonoCardLayout.addWidget(stereoMonoTitle)
+
+        stereoMonoRow = QHBoxLayout()
+        stereoMonoRow.setSpacing(6)
+        for mode, label in (
+            ("normal", "Normal"),
+            ("calibration", "Calibration"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            if mode == "normal":
+                btn.setToolTip("Default disparity view")
+            else:
+                btn.setToolTip("Calibration workflow")
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(255,255,255,0.06);
+                    color: #e8ecf3;
+                    border: 1px solid rgba(255,255,255,0.12);
+                    border-radius: 10px;
+                    padding: 8px 14px;
+                    font-size: 13px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(0,210,255,0.14);
+                    border: 1px solid rgba(0,210,255,0.32);
+                }
+                QPushButton:checked {
+                    background-color: rgba(0,210,255,0.18);
+                    border: 1px solid rgba(0,210,255,0.65);
+                    color: #0fd3ff;
+                }
+                """
+            )
+            btn.clicked.connect(lambda checked, m=mode: self.__setStereoMonoMode(m))
+            self.__stereoMonoGroup.addButton(btn)
+            self.__stereoMonoButtons[mode] = btn
+            stereoMonoRow.addWidget(btn)
+        self.__stereoMonoButtons[self.__stereoMonoMode].setChecked(True)
+        stereoMonoRow.addStretch()
+        stereoMonoCardLayout.addLayout(stereoMonoRow)
+        controlsLayout.addWidget(stereoMonoCard)
+        self.__stereoMonoCard = stereoMonoCard
+        self.__stereoMonoCard.setVisible(False)
+
+        # Training library panel (device videos + local upload controls)
+        simulationCard = QFrame()
+        simulationCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
+        simulationLayout = QVBoxLayout(simulationCard)
+        simulationLayout.setContentsMargins(12, 12, 12, 12)
+        simulationLayout.setSpacing(10)
+        simulationTitle = QLabel("Training Library")
+        simulationTitle.setObjectName("card-title")
+        simulationLayout.addWidget(simulationTitle)
+
+        simulationRow = QHBoxLayout()
+        simulationRow.setSpacing(10)
+        simulationLayout.addLayout(simulationRow)
+
+        deviceCard = QFrame()
+        deviceCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.02);"
+        )
+        deviceLayout = QVBoxLayout(deviceCard)
+        deviceLayout.setContentsMargins(10, 10, 10, 10)
+        deviceLayout.setSpacing(8)
+        deviceTitle = QLabel("Device Videos")
+        deviceTitle.setObjectName("card-title")
+        deviceLayout.addWidget(deviceTitle)
+
+        self.__deviceVideoList = QListWidget()
+        self.__deviceVideoList.setMinimumHeight(160)
+        self.__deviceVideoList.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.__deviceVideoList.customContextMenuRequested.connect(self.__showDeviceVideoMenu)
+        self.__deviceVideoList.setStyleSheet(
+            """
+            QListWidget {
+                background-color: rgba(5, 8, 13, 0.8);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                padding: 6px;
+            }
+            QListWidget::item {
+                padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(0,210,255,0.18);
+                color: #0fd3ff;
+            }
+            """
+        )
+        self.updateDeviceVideoList([])
+        deviceLayout.addWidget(self.__deviceVideoList)
+        simulationRow.addWidget(deviceCard, stretch=1)
+
+        localCard = QFrame()
+        localCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.02);"
+        )
+        localLayout = QVBoxLayout(localCard)
+        localLayout.setContentsMargins(10, 10, 10, 10)
+        localLayout.setSpacing(8)
+        localTitle = QLabel("Local Upload")
+        localTitle.setObjectName("card-title")
+        localLayout.addWidget(localTitle)
+
+        # Upload controls
+        self.__uploadVideo       = QPushButton("Upload Video")
+        self.__saveIcon          = QIcon("icons/save-icon.svg")
+        if self.__saveIcon.isNull():
+            self.__saveIcon = QIcon("icons/file-manager-icon.svg")
+        self.__saveSnapshotBtn   = IconButton(self.__saveIcon, icon_size=QSize(18, 18))
+        self.__fileLineEdit      = QLineEdit()
+        self.__fileLineEdit.setPlaceholderText("Select a .mov file to stream out")
+        last_path = self.__settings.value("lastFilePath", "", str)
+        if last_path:
+            self.__fileLineEdit.setText(last_path)
+        self.__browseButton      = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(32, 32))
+
+        self.__fileLineEdit.setMinimumWidth(240)
+        self.__fileLineEdit.setMinimumHeight(32)
+        self.__fileLineEdit.setStyleSheet("padding: 6px 10px; font-size: 13px;")
+        self.__browseButton.setIconSize(QSize(32, 32))
+        self.__browseButton.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.1);
+                color: white;
+                font-size: 15px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255,255,255,0.25);
+                padding: 8px 15px; 
+            }
+            QPushButton:pressed {
+                background-color: rgba(255,255,255,0.35);
+            }
+            """
+        )
+
+        uploadRow = QHBoxLayout()
+        uploadRow.setSpacing(8)
+        uploadRow.addWidget(self.__fileLineEdit, stretch=1)
+        uploadRow.addWidget(self.__browseButton)
+        localLayout.addLayout(uploadRow)
+
+        self.__activeFileLabel = QLabel("Active file: none")
+        self.__activeFileLabel.setObjectName("muted")
+        self.__activeFileLabel.setStyleSheet("font-size: 12px;")
+        localLayout.addWidget(self.__activeFileLabel)
+
+        self.__uploadVideo.setFixedHeight(36)
+        self.__uploadVideo.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(0,210,255,0.16);
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.35);
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.24);
+            }
+            """
+        )
+        self.__saveSnapshotBtn.setFixedSize(36, 36)
+        self.__saveSnapshotBtn.setToolTip("Write to device")
+        self.__saveSnapshotBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.06);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            """
+        )
+
+        uploadButtons = QHBoxLayout()
+        uploadButtons.setSpacing(8)
+        uploadButtons.addWidget(self.__uploadVideo)
+        uploadButtons.addWidget(self.__saveSnapshotBtn)
+        uploadButtons.addStretch()
+        localLayout.addLayout(uploadButtons)
+
+        simulationRow.addWidget(localCard, stretch=1)
+
+        self.__simulationCard = simulationCard
+        self.__simulationCard.setVisible(False)
+        controlsLayout.addWidget(simulationCard)
 
         # FPS control
         fpsCard = QFrame()
-        fpsCard.setStyleSheet("border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);")
+        fpsCard.setStyleSheet("border: none; border-radius: 10px; background: rgba(255,255,255,0.03);")
         fpsLayout = QHBoxLayout(fpsCard)
         fpsLayout.setContentsMargins(12, 12, 12, 12)
         fpsLayout.setSpacing(10)
@@ -301,66 +648,544 @@ class VideoStreamingWindow(QWidget):
         fpsLayout.setAlignment(fpsLabel, Qt.AlignmentFlag.AlignLeft)
         fpsLayout.addStretch()
         fpsLayout.setAlignment(self.__fpsSel, Qt.AlignmentFlag.AlignLeft)
-        controlsLayout.addWidget(fpsCard)
+        self.__tabs.addTab(self.__controlsTab, self.__controlsTabLabel)
+        self.__controlsTabIndex = self.__tabs.indexOf(self.__controlsTab)
+        if self.__controlsTabIndex != -1:
+            self.__tabBar.setTabData(self.__controlsTabIndex, "controls")
 
-        # Upload controls
-        self.__uploadVideo       = QPushButton("Upload Video")
-        self.__fileLineEdit      = QLineEdit()
-        self.__fileLineEdit.setPlaceholderText("Select a .mov file to stream out")
-        last_path = self.__settings.value("lastFilePath", "", str)
-        if last_path:
-            self.__fileLineEdit.setText(last_path)
-        self.__browseButton      = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(32, 32))
+        # Calibration controls (shown when stereo sub-mode is calibration)
+        input_style = """
+        QSpinBox, QDoubleSpinBox {
+            background-color: rgba(255,255,255,0.1);
+            color: #e8ecf3;
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 12px;
+        }
+        QSpinBox:hover, QDoubleSpinBox:hover {
+            background-color: rgba(0,210,255,0.16);
+            border: 1px solid rgba(0,210,255,0.35);
+        }
+        """
+        combo_style = """
+        QComboBox {
+            background-color: rgba(255,255,255,0.1);
+            color: #e8ecf3;
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+            padding-right: 26px;
+        }
+        QComboBox:hover {
+            background-color: rgba(0,210,255,0.16);
+            border: 1px solid rgba(0,210,255,0.35);
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 22px;
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+        }
+        """
+        line_style = """
+        QLineEdit {
+            background-color: rgba(255,255,255,0.1);
+            color: #e8ecf3;
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+        QLineEdit:hover {
+            background-color: rgba(0,210,255,0.16);
+            border: 1px solid rgba(0,210,255,0.35);
+        }
+        """
+        button_style = """
+        QPushButton {
+            background-color: rgba(255,255,255,0.06);
+            color: #e8ecf3;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background-color: rgba(0,210,255,0.16);
+            border: 1px solid rgba(0,210,255,0.35);
+        }
+        """
+        primary_button_style = """
+        QPushButton {
+            background-color: rgba(0,210,255,0.18);
+            color: #e8ecf3;
+            border: 1px solid rgba(0,210,255,0.55);
+            border-radius: 10px;
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        QPushButton:hover {
+            background-color: rgba(0,210,255,0.28);
+        }
+        """
+        checkbox_style = """
+        QCheckBox {
+            color: #e8ecf3;
+            spacing: 8px;
+            font-size: 12px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 4px;
+            background-color: rgba(255,255,255,0.06);
+        }
+        QCheckBox::indicator:checked {
+            background-color: rgba(0,210,255,0.35);
+            border: 1px solid rgba(0,210,255,0.65);
+        }
+        """
+        card_style = "border: none; border-radius: 10px; background: rgba(255,255,255,0.03);"
+        label_style = "color: #9ba7b4; font-size: 12px;"
 
-        self.__fileLineEdit.setMinimumWidth(360)
-        self.__fileLineEdit.setMinimumHeight(32)
-        self.__fileLineEdit.setStyleSheet("padding: 6px 10px; font-size: 13px;")
-        self.__browseButton.setIconSize(QSize(32, 32))
-        self.__browseButton.setStyleSheet(
+        def make_double(min_val, max_val, step, decimals=3, suffix=""):
+            spin = QDoubleSpinBox()
+            spin.setRange(min_val, max_val)
+            spin.setSingleStep(step)
+            spin.setDecimals(decimals)
+            if suffix:
+                spin.setSuffix(suffix)
+            spin.setStyleSheet(input_style)
+            spin.setMinimumWidth(120)
+            return spin
+
+        def make_int(min_val, max_val, step=1, suffix=""):
+            spin = QSpinBox()
+            spin.setRange(min_val, max_val)
+            spin.setSingleStep(step)
+            if suffix:
+                spin.setSuffix(suffix)
+            spin.setStyleSheet(input_style)
+            spin.setMinimumWidth(120)
+            return spin
+
+        self.__calibProfiles: dict[str, dict] = {}
+        self.__calibFields: dict[str, QWidget] = {}
+
+        profileCard = QFrame()
+        profileCard.setStyleSheet(card_style)
+        profileLayout = QVBoxLayout(profileCard)
+        profileLayout.setContentsMargins(12, 12, 12, 12)
+        profileLayout.setSpacing(8)
+        profileTitle = QLabel("Calibration Profiles")
+        profileTitle.setObjectName("card-title")
+        profileLayout.addWidget(profileTitle)
+
+        profileRow = QHBoxLayout()
+        profileRow.setSpacing(8)
+        profileLabel = QLabel("Saved")
+        profileLabel.setStyleSheet(label_style)
+        self.__calibProfileCombo = QComboBox()
+        self.__calibProfileCombo.setStyleSheet(combo_style)
+        self.__calibProfileCombo.setMinimumWidth(180)
+        self.__calibLoadBtn = QPushButton("Load")
+        self.__calibLoadBtn.setStyleSheet(button_style)
+        self.__calibDeleteBtn = QPushButton("Delete")
+        self.__calibDeleteBtn.setStyleSheet(button_style)
+        profileRow.addWidget(profileLabel)
+        profileRow.addWidget(self.__calibProfileCombo, stretch=1)
+        profileRow.addWidget(self.__calibLoadBtn)
+        profileRow.addWidget(self.__calibDeleteBtn)
+        profileLayout.addLayout(profileRow)
+
+        profileNameRow = QHBoxLayout()
+        profileNameRow.setSpacing(8)
+        nameLabel = QLabel("Name")
+        nameLabel.setStyleSheet(label_style)
+        self.__calibProfileName = QLineEdit()
+        self.__calibProfileName.setPlaceholderText("Profile name")
+        self.__calibProfileName.setStyleSheet(line_style)
+        self.__calibSaveBtn = QPushButton("Save")
+        self.__calibSaveBtn.setStyleSheet(button_style)
+        self.__calibSaveBtn.setToolTip("Save profile locally")
+        profileNameRow.addWidget(nameLabel)
+        profileNameRow.addWidget(self.__calibProfileName, stretch=1)
+        profileNameRow.addWidget(self.__calibSaveBtn)
+        profileLayout.addLayout(profileNameRow)
+
+        self.__calibStartIcon = QIcon("icons/play-icon.svg")
+        self.__calibStopIcon = QIcon("icons/red-square-shape-icon.svg")
+        self.__calibModeBtn = QPushButton("Start Calibration")
+        self.__calibModeBtn.setCheckable(True)
+        self.__calibModeBtn.setIcon(self.__calibStartIcon)
+        self.__calibModeBtn.setIconSize(QSize(16, 16))
+        self.__calibModeBtn.setToolTip("Begin capturing calibration samples")
+        self.__calibModeBtn.setStyleSheet(
             """
             QPushButton {
-                background-color: rgba(255,255,255,0.1);
-                color: white;
-                font-size: 15px;
-                border-radius: 6px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(0,210,255,0.18),
+                    stop:1 rgba(0,180,230,0.28));
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.55);
+                border-radius: 12px;
+                padding: 9px 16px;
+                font-size: 12px;
+                font-weight: 700;
             }
             QPushButton:hover {
-                background-color: rgba(255,255,255,0.25);
-                padding: 8px 15px; 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(0,210,255,0.28),
+                    stop:1 rgba(0,180,230,0.38));
             }
-            QPushButton:pressed {
-                background-color: rgba(255,255,255,0.35);
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(231,76,60,0.22),
+                    stop:1 rgba(231,76,60,0.38));
+                border: 1px solid rgba(231,76,60,0.6);
+                color: #ffd1cc;
             }
             """
         )
-
-        uploadRow = QHBoxLayout()
-        uploadRow.setSpacing(8)
-        uploadRow.addWidget(self.__fileLineEdit, stretch=1)
-        uploadRow.addWidget(self.__browseButton)
-        controlsLayout.addLayout(uploadRow)
-
-        self.__uploadVideo.setFixedHeight(36)
-        self.__uploadVideo.setStyleSheet(
+        self.__calibModeBtn.setVisible(False)
+        self.__calibCaptureBtn = QPushButton("Perform Capture")
+        self.__calibCaptureBtn.setStyleSheet(
             """
             QPushButton {
-                background-color: rgba(0,210,255,0.16);
+                background-color: rgba(255,255,255,0.08);
                 color: #e8ecf3;
-                border: 1px solid rgba(0,210,255,0.35);
+                border: 1px solid rgba(255,255,255,0.18);
                 border-radius: 10px;
                 padding: 8px 14px;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: rgba(0,210,255,0.24);
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
             }
             """
         )
-        controlsLayout.addWidget(self.__uploadVideo)
-        # controlsLayout.addWidget(self.__startStreamOutBtn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.__calibCaptureBtn.setToolTip("Capture a calibration sample")
+        self.__calibCaptureBtn.setVisible(False)
+        self.__calibPauseBtn = QPushButton("Pause")
+        self.__calibPauseBtn.setCheckable(True)
+        self.__calibPauseBtn.setStyleSheet(button_style)
+        self.__calibPauseBtn.setToolTip("Pause calibration capture")
+        self.__calibPauseBtn.setEnabled(False)
+        self.__calibPauseBtn.setVisible(False)
 
-        self.__tabs.addTab(controlsTab, "Stream Controls")
+        self.__calibSendParamsBtn = QPushButton("Send Settings")
+        self.__calibSendParamsBtn.setStyleSheet(button_style)
+        self.__calibSendParamsBtn.setToolTip("Send calibration settings to device")
+
+        self.__calibAbortBtn = QPushButton("Abort")
+        self.__calibAbortBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(231,76,60,0.14);
+                color: #ffd1cc;
+                border: 1px solid rgba(231,76,60,0.45);
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(231,76,60,0.24);
+                border: 1px solid rgba(231,76,60,0.65);
+            }
+            """
+        )
+        self.__calibAbortBtn.setToolTip("Abort calibration session")
+        self.__calibAbortBtn.setEnabled(False)
+        self.__calibAbortBtn.setVisible(False)
+
+        self.__calibResetBtn = QPushButton("Reset Samples")
+        self.__calibResetBtn.setStyleSheet(button_style)
+        self.__calibResetBtn.setToolTip("Clear captured samples")
+        self.__calibResetBtn.setEnabled(False)
+        self.__calibStoreBtn = QPushButton("Store Host Result")
+        self.__calibStoreBtn.setStyleSheet(button_style)
+        self.__calibStoreBtn.setToolTip("Ask host to persist its latest calibration results")
+
+        calibrationCard = QFrame()
+        calibrationCard.setStyleSheet(card_style)
+        calibrationLayout = QVBoxLayout(calibrationCard)
+        calibrationLayout.setContentsMargins(12, 12, 12, 12)
+        calibrationLayout.setSpacing(12)
+        calibrationTitle = QLabel("Stereo Calibration")
+        calibrationTitle.setObjectName("card-title")
+        calibrationLayout.addWidget(calibrationTitle)
+
+        calibrationLayout.addWidget(profileCard)
+
+        sessionCard = QFrame()
+        sessionCard.setStyleSheet(card_style)
+        sessionLayout = QVBoxLayout(sessionCard)
+        sessionLayout.setContentsMargins(12, 12, 12, 12)
+        sessionLayout.setSpacing(8)
+        sessionTitle = QLabel("Session Controls")
+        sessionTitle.setObjectName("card-title")
+        sessionLayout.addWidget(sessionTitle)
+
+        sessionRow = QHBoxLayout()
+        sessionRow.setSpacing(8)
+        sessionRow.addWidget(self.__calibModeBtn)
+        sessionRow.addWidget(self.__calibPauseBtn)
+        sessionRow.addWidget(self.__calibSendParamsBtn)
+        sessionRow.addWidget(self.__calibCaptureBtn)
+        sessionRow.addWidget(self.__calibResetBtn)
+        sessionRow.addWidget(self.__calibAbortBtn)
+        sessionRow.addStretch()
+        sessionLayout.addLayout(sessionRow)
+
+        statsRow = QHBoxLayout()
+        statsRow.setSpacing(10)
+        self.__calibCountLabel = QLabel("Samples: 0/0")
+        self.__calibCountLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__calibStatusLabel = QLabel("CALIB: --")
+        self.__calibStatusLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        self.__calibStatusLabel.setWordWrap(True)
+        statsRow.addWidget(self.__calibCountLabel)
+        statsRow.addWidget(self.__calibStatusLabel, stretch=1)
+        sessionLayout.addLayout(statsRow)
+
+        storeRow = QHBoxLayout()
+        storeRow.setSpacing(8)
+        storeRow.addWidget(self.__calibStoreBtn)
+        storeRow.addStretch()
+        sessionLayout.addLayout(storeRow)
+
+        calibrationLayout.addWidget(sessionCard)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            """
+            QScrollArea { border: none; background: transparent; }
+            QScrollArea::viewport { background: transparent; }
+            """
+        )
+        calibBody = QWidget()
+        calibBody.setObjectName("calibration-body")
+        calibBody.setStyleSheet("background: transparent;")
+        scroll.setWidget(calibBody)
+        calibrationLayout.addWidget(scroll, stretch=1)
+
+        bodyLayout = QVBoxLayout(calibBody)
+        bodyLayout.setContentsMargins(0, 0, 0, 0)
+        bodyLayout.setSpacing(12)
+
+        def make_label(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setStyleSheet(label_style)
+            return label
+
+        targetCard = QFrame()
+        targetCard.setStyleSheet(card_style)
+        targetLayout = QVBoxLayout(targetCard)
+        targetLayout.setContentsMargins(12, 12, 12, 12)
+        targetLayout.setSpacing(8)
+        targetTitle = QLabel("Target & Pattern")
+        targetTitle.setObjectName("card-title")
+        targetLayout.addWidget(targetTitle)
+        targetForm = QFormLayout()
+        targetForm.setHorizontalSpacing(14)
+        targetForm.setVerticalSpacing(8)
+        targetLayout.addLayout(targetForm)
+
+        targetType = QComboBox()
+        targetType.addItems(["Chessboard", "Charuco", "Circles Grid"])
+        targetType.setStyleSheet(combo_style)
+        patternCols = make_int(2, 64, 1)
+        patternCols.setValue(9)
+        patternRows = make_int(2, 64, 1)
+        patternRows.setValue(6)
+        squareSize = make_double(0.0, 1000.0, 0.1, 3, " mm")
+        squareSize.setValue(25.0)
+        markerSize = make_double(0.0, 1000.0, 0.1, 3, " mm")
+        markerSize.setValue(15.0)
+        markerSize.setEnabled(False)
+        unitsCombo = QComboBox()
+        unitsCombo.addItems(["mm", "m"])
+        unitsCombo.setStyleSheet(combo_style)
+
+        targetForm.addRow(make_label("Target type"), targetType)
+        targetForm.addRow(make_label("Pattern cols"), patternCols)
+        targetForm.addRow(make_label("Pattern rows"), patternRows)
+        targetForm.addRow(make_label("Square size"), squareSize)
+        targetForm.addRow(make_label("Marker size"), markerSize)
+        targetForm.addRow(make_label("Units"), unitsCombo)
+
+        self.__calibFields["target_type"] = targetType
+        self.__calibFields["pattern_cols"] = patternCols
+        self.__calibFields["pattern_rows"] = patternRows
+        self.__calibFields["square_size"] = squareSize
+        self.__calibFields["marker_size"] = markerSize
+        self.__calibFields["square_units"] = unitsCombo
+
+        def update_marker_state(text: str) -> None:
+            markerSize.setEnabled(text.strip().lower() == "charuco")
+
+        def update_unit_suffix(unit: str) -> None:
+            suffix = f" {unit}"
+            squareSize.setSuffix(suffix)
+            markerSize.setSuffix(suffix)
+
+        targetType.currentTextChanged.connect(update_marker_state)
+        unitsCombo.currentTextChanged.connect(update_unit_suffix)
+        update_unit_suffix(unitsCombo.currentText())
+
+        bodyLayout.addWidget(targetCard)
+
+        captureCard = QFrame()
+        captureCard.setStyleSheet(card_style)
+        captureLayout = QVBoxLayout(captureCard)
+        captureLayout.setContentsMargins(12, 12, 12, 12)
+        captureLayout.setSpacing(8)
+        captureTitle = QLabel("Capture Policy")
+        captureTitle.setObjectName("card-title")
+        captureLayout.addWidget(captureTitle)
+        captureForm = QFormLayout()
+        captureForm.setHorizontalSpacing(14)
+        captureForm.setVerticalSpacing(8)
+        captureLayout.addLayout(captureForm)
+
+        captureMode = QComboBox()
+        captureMode.addItems(["Manual", "Auto"])
+        captureMode.setStyleSheet(combo_style)
+        requiredSamples = make_int(5, 500, 1)
+        requiredSamples.setValue(25)
+        stableFrames = make_int(0, 120, 1)
+        stableFrames.setValue(3)
+        minInterval = make_double(0.0, 10.0, 0.1, 2, " s")
+        minInterval.setValue(0.5)
+
+        captureForm.addRow(make_label("Capture mode"), captureMode)
+        captureForm.addRow(make_label("Required samples"), requiredSamples)
+        captureForm.addRow(make_label("Stable frames"), stableFrames)
+        captureForm.addRow(make_label("Min interval"), minInterval)
+
+        self.__calibFields["capture_mode"] = captureMode
+        self.__calibFields["required_samples"] = requiredSamples
+        self.__calibFields["stable_frames"] = stableFrames
+        self.__calibFields["min_interval_s"] = minInterval
+
+        def update_capture_button(text: str) -> None:
+            self.__calibCaptureBtn.setEnabled(text.strip().lower() == "manual")
+
+        captureMode.currentTextChanged.connect(update_capture_button)
+        update_capture_button(captureMode.currentText())
+
+        bodyLayout.addWidget(captureCard)
+
+        qualityCard = QFrame()
+        qualityCard.setStyleSheet(card_style)
+        qualityLayout = QVBoxLayout(qualityCard)
+        qualityLayout.setContentsMargins(12, 12, 12, 12)
+        qualityLayout.setSpacing(8)
+        qualityTitle = QLabel("Quality Thresholds")
+        qualityTitle.setObjectName("card-title")
+        qualityLayout.addWidget(qualityTitle)
+        qualityForm = QFormLayout()
+        qualityForm.setHorizontalSpacing(14)
+        qualityForm.setVerticalSpacing(8)
+        qualityLayout.addLayout(qualityForm)
+
+        minCorners = make_int(0, 2000, 1)
+        minCorners.setValue(0)
+        blurThreshold = make_double(0.0, 5000.0, 1.0, 1)
+        blurThreshold.setValue(0.0)
+        edgeMargin = make_int(0, 200, 1, " px")
+        edgeMargin.setValue(0)
+        minTargetSize = make_int(0, 100, 1, " %")
+        minTargetSize.setValue(0)
+        maxTargetSize = make_int(0, 100, 1, " %")
+        maxTargetSize.setValue(0)
+        maxReproj = make_double(0.0, 20.0, 0.01, 3, " px")
+        maxReproj.setValue(0.0)
+
+        qualityForm.addRow(make_label("Min corners"), minCorners)
+        qualityForm.addRow(make_label("Blur threshold"), blurThreshold)
+        qualityForm.addRow(make_label("Edge margin"), edgeMargin)
+        qualityForm.addRow(make_label("Min target size"), minTargetSize)
+        qualityForm.addRow(make_label("Max target size"), maxTargetSize)
+        qualityForm.addRow(make_label("Max reprojection error"), maxReproj)
+
+        self.__calibFields["min_corners"] = minCorners
+        self.__calibFields["blur_threshold"] = blurThreshold
+        self.__calibFields["edge_margin_px"] = edgeMargin
+        self.__calibFields["min_target_size_pct"] = minTargetSize
+        self.__calibFields["max_target_size_pct"] = maxTargetSize
+        self.__calibFields["max_reproj_error_px"] = maxReproj
+
+        bodyLayout.addWidget(qualityCard)
+
+        outputCard = QFrame()
+        outputCard.setStyleSheet(card_style)
+        outputLayout = QVBoxLayout(outputCard)
+        outputLayout.setContentsMargins(12, 12, 12, 12)
+        outputLayout.setSpacing(8)
+        outputTitle = QLabel("Output View")
+        outputTitle.setObjectName("card-title")
+        outputLayout.addWidget(outputTitle)
+        outputForm = QFormLayout()
+        outputForm.setHorizontalSpacing(14)
+        outputForm.setVerticalSpacing(8)
+        outputLayout.addLayout(outputForm)
+
+        showOverlays = QCheckBox("Show overlays (corners/axes)")
+        showOverlays.setStyleSheet(checkbox_style)
+        showStats = QCheckBox("Show stats (reprojection error)")
+        showStats.setStyleSheet(checkbox_style)
+        streamView = QComboBox()
+        streamView.addItems(["Combined", "Left", "Right"])
+        streamView.setStyleSheet(combo_style)
+
+        outputForm.addRow(showOverlays)
+        outputForm.addRow(showStats)
+        outputForm.addRow(make_label("Stream view"), streamView)
+
+        self.__calibFields["show_overlays"] = showOverlays
+        self.__calibFields["show_stats"] = showStats
+        self.__calibFields["stream_view"] = streamView
+
+        bodyLayout.addWidget(outputCard)
+
+        computeCard = QFrame()
+        computeCard.setStyleSheet(card_style)
+        computeLayout = QVBoxLayout(computeCard)
+        computeLayout.setContentsMargins(12, 12, 12, 12)
+        computeLayout.setSpacing(8)
+        computeTitle = QLabel("Compute")
+        computeTitle.setObjectName("card-title")
+        computeLayout.addWidget(computeTitle)
+        computeRow = QHBoxLayout()
+        computeRow.setSpacing(8)
+        self.__calibRecomputeRectify = QCheckBox("Recompute rectification")
+        self.__calibRecomputeRectify.setStyleSheet(checkbox_style)
+        self.__calibApplyBtn = QPushButton("Run Calibration")
+        self.__calibApplyBtn.setStyleSheet(primary_button_style)
+        self.__calibApplyBtn.setToolTip("Run calibration with current settings")
+        computeRow.addWidget(self.__calibRecomputeRectify)
+        computeRow.addStretch()
+        computeRow.addWidget(self.__calibApplyBtn)
+        computeLayout.addLayout(computeRow)
+
+        self.__calibFields["recompute_rectification"] = self.__calibRecomputeRectify
+
+        bodyLayout.addWidget(computeCard)
+
+        self.__calibrationCard = calibrationCard
+        self.__calibrationCard.setVisible(False)
+        controlsLayout.addWidget(self.__calibrationCard)
+        controlsLayout.addWidget(fpsCard)
         
         # Icon playig flag
         self.__isPlaying = False
@@ -380,11 +1205,452 @@ class VideoStreamingWindow(QWidget):
         self.__browseButton.clicked.connect(self.__openFileDialog)
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
         self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
+        self.__saveSnapshotBtn.clicked.connect(self.__saveVideoOnDevice)
+        self.__fileLineEdit.textChanged.connect(self.__updateActiveFileLabel)
+        self.__calibSaveBtn.clicked.connect(self.__saveCalibrationProfile)
+        self.__calibLoadBtn.clicked.connect(self.__loadCalibrationProfile)
+        self.__calibDeleteBtn.clicked.connect(self.__deleteCalibrationProfile)
+        self.__calibApplyBtn.clicked.connect(self.__applyCalibrationToCamera)
+        self.__calibModeBtn.clicked.connect(self.__toggleCalibrationMode)
+        self.__calibCaptureBtn.clicked.connect(self.__performCalibrationCapture)
+        self.__calibPauseBtn.clicked.connect(self.__toggleCalibrationPause)
+        self.__calibSendParamsBtn.clicked.connect(self.__sendCalibrationSettings)
+        self.__calibAbortBtn.clicked.connect(self.__abortCalibrationSession)
+        self.__calibResetBtn.clicked.connect(self.__resetCalibrationSamples)
+        self.__calibStoreBtn.clicked.connect(self.__storeCalibrationResult)
+        self.__calibProfileCombo.currentTextChanged.connect(self.__syncCalibrationProfileName)
         
-        # Default view mode
-        self.__setViewMode(self.__viewMode, emit_signal=False)
-    
-    
+        # Default stream mode
+        self.__setStreamMode(self.__streamMode, emit_signal=False)
+        self.__updateActiveFileLabel(self.__fileLineEdit.text())
+        self.__loadCalibrationProfiles()
+
+
+    def __updateActiveFileLabel(self, path: str) -> None:
+        name = os.path.basename(path) if path else ""
+        if not name:
+            self.__activeFileLabel.setText("Active file: none")
+        else:
+            self.__activeFileLabel.setText(f"Active file: {name}")
+
+    def updateCalibrationStats(self, count_text: str | None, status_text: str | None) -> None:
+        if hasattr(self, "_VideoStreamingWindow__calibCountLabel") and count_text:
+            self.__calibCountLabel.setText(str(count_text))
+        if hasattr(self, "_VideoStreamingWindow__calibStatusLabel") and status_text:
+            self.__calibStatusLabel.setText(str(status_text))
+        self.__resizeControlsPopout()
+
+
+    def __syncCalibrationProfileName(self, name: str) -> None:
+        if not name:
+            return
+        self.__calibProfileName.setText(name)
+
+    def __toggleCalibrationMode(self, checked: bool | None = None, emit_signal: bool = True) -> None:
+        active = self.__calibModeBtn.isChecked()
+        if active:
+            self.__calibModeBtn.setText("Stop Calibration")
+            self.__calibModeBtn.setIcon(self.__calibStopIcon)
+            self.__calibModeBtn.setToolTip("Stop capturing calibration samples")
+        else:
+            self.__calibModeBtn.setText("Start Calibration")
+            self.__calibModeBtn.setIcon(self.__calibStartIcon)
+            self.__calibModeBtn.setToolTip("Begin capturing calibration samples")
+            if self.__calibPauseBtn.isChecked():
+                self.__calibPauseBtn.setChecked(False)
+                self.__toggleCalibrationPause()
+        self.__calibCaptureBtn.setVisible(False)
+        self.__calibPauseBtn.setEnabled(False)
+        self.__calibResetBtn.setEnabled(active)
+        self.__calibAbortBtn.setEnabled(False)
+        if emit_signal:
+            self.calibrationModeToggled.emit(active)
+        self.__resizeControlsPopout()
+
+    def __performCalibrationCapture(self) -> None:
+        self.calibrationCaptureRequested.emit()
+
+    def __sendCalibrationSettings(self) -> None:
+        if not self.__calibModeBtn.isChecked():
+            self.__calibModeBtn.setChecked(True)
+            self.__toggleCalibrationMode()
+        else:
+            self.calibrationModeToggled.emit(True)
+        self.__applyCalibrationToCamera()
+
+    def __toggleCalibrationPause(self) -> None:
+        paused = self.__calibPauseBtn.isChecked()
+        if paused:
+            self.__calibPauseBtn.setText("Resume")
+            self.__calibPauseBtn.setToolTip("Resume calibration capture")
+        else:
+            self.__calibPauseBtn.setText("Pause")
+            self.__calibPauseBtn.setToolTip("Pause calibration capture")
+        self.calibrationPauseToggled.emit(paused)
+
+    def __abortCalibrationSession(self) -> None:
+        self.calibrationAbortRequested.emit()
+
+    def __resetCalibrationSamples(self) -> None:
+        self.calibrationResetRequested.emit()
+
+
+    def __collectCalibrationParams(self) -> dict:
+        profile_name = self.__calibProfileName.text().strip() or self.__calibProfileCombo.currentText().strip()
+        target_type = self.__calibFields.get("target_type")
+        pattern_cols = self.__calibFields.get("pattern_cols")
+        pattern_rows = self.__calibFields.get("pattern_rows")
+        square_size = self.__calibFields.get("square_size")
+        square_units = self.__calibFields.get("square_units")
+        marker_size = self.__calibFields.get("marker_size")
+        capture_mode = self.__calibFields.get("capture_mode")
+        required_samples = self.__calibFields.get("required_samples")
+        stable_frames = self.__calibFields.get("stable_frames")
+        min_interval = self.__calibFields.get("min_interval_s")
+        min_corners = self.__calibFields.get("min_corners")
+        blur_threshold = self.__calibFields.get("blur_threshold")
+        edge_margin = self.__calibFields.get("edge_margin_px")
+        min_target_size = self.__calibFields.get("min_target_size_pct")
+        max_target_size = self.__calibFields.get("max_target_size_pct")
+        max_reproj = self.__calibFields.get("max_reproj_error_px")
+        show_overlays = self.__calibFields.get("show_overlays")
+        show_stats = self.__calibFields.get("show_stats")
+        stream_view = self.__calibFields.get("stream_view")
+        recompute_rectify = self.__calibFields.get("recompute_rectification")
+
+        return {
+            "profile_name": profile_name,
+            "target": {
+                "type": target_type.currentText().lower() if isinstance(target_type, QComboBox) else "chessboard",
+                "pattern": {
+                    "cols": int(pattern_cols.value()) if isinstance(pattern_cols, QSpinBox) else 0,
+                    "rows": int(pattern_rows.value()) if isinstance(pattern_rows, QSpinBox) else 0,
+                },
+                "square_size": {
+                    "value": float(square_size.value()) if isinstance(square_size, QDoubleSpinBox) else 0.0,
+                    "units": square_units.currentText() if isinstance(square_units, QComboBox) else "mm",
+                },
+                "marker_size": {
+                    "value": float(marker_size.value()) if isinstance(marker_size, QDoubleSpinBox) else 0.0,
+                    "units": square_units.currentText() if isinstance(square_units, QComboBox) else "mm",
+                },
+            },
+            "capture": {
+                "mode": capture_mode.currentText().lower() if isinstance(capture_mode, QComboBox) else "manual",
+                "required_samples": int(required_samples.value()) if isinstance(required_samples, QSpinBox) else 0,
+                "stable_frames": int(stable_frames.value()) if isinstance(stable_frames, QSpinBox) else 0,
+                "min_interval_s": float(min_interval.value()) if isinstance(min_interval, QDoubleSpinBox) else 0.0,
+            },
+            "quality": {
+                "min_corners": int(min_corners.value()) if isinstance(min_corners, QSpinBox) else 0,
+                "blur_threshold": float(blur_threshold.value()) if isinstance(blur_threshold, QDoubleSpinBox) else 0.0,
+                "edge_margin_px": int(edge_margin.value()) if isinstance(edge_margin, QSpinBox) else 0,
+                "min_target_size_pct": int(min_target_size.value()) if isinstance(min_target_size, QSpinBox) else 0,
+                "max_target_size_pct": int(max_target_size.value()) if isinstance(max_target_size, QSpinBox) else 0,
+                "max_reproj_error_px": float(max_reproj.value()) if isinstance(max_reproj, QDoubleSpinBox) else 0.0,
+            },
+            "compute": {
+                "recompute_rectification": bool(recompute_rectify.isChecked()) if isinstance(recompute_rectify, QCheckBox) else False,
+            },
+            "output_view": {
+                "show_overlays": bool(show_overlays.isChecked()) if isinstance(show_overlays, QCheckBox) else False,
+                "show_stats": bool(show_stats.isChecked()) if isinstance(show_stats, QCheckBox) else False,
+                "stream_view": stream_view.currentText().lower() if isinstance(stream_view, QComboBox) else "combined",
+            },
+        }
+
+
+    def __applyCalibrationParams(self, params: dict) -> None:
+        if not isinstance(params, dict):
+            return
+        profile_name = params.get("profile_name")
+        if profile_name:
+            self.__calibProfileName.setText(str(profile_name))
+
+        target = params.get("target", {})
+        if isinstance(target, dict):
+            target_type = self.__calibFields.get("target_type")
+            if isinstance(target_type, QComboBox):
+                target_value = str(target.get("type", "")).title()
+                if target_value and target_type.findText(target_value) == -1:
+                    target_type.addItem(target_value)
+                if target_value:
+                    target_type.setCurrentText(target_value)
+            pattern = target.get("pattern", {})
+            if isinstance(pattern, dict):
+                pattern_cols = self.__calibFields.get("pattern_cols")
+                if isinstance(pattern_cols, QSpinBox):
+                    pattern_cols.setValue(int(pattern.get("cols", pattern_cols.value())))
+                pattern_rows = self.__calibFields.get("pattern_rows")
+                if isinstance(pattern_rows, QSpinBox):
+                    pattern_rows.setValue(int(pattern.get("rows", pattern_rows.value())))
+            square = target.get("square_size", {})
+            if isinstance(square, dict):
+                square_size = self.__calibFields.get("square_size")
+                if isinstance(square_size, QDoubleSpinBox):
+                    square_size.setValue(float(square.get("value", square_size.value())))
+                square_units = self.__calibFields.get("square_units")
+                if isinstance(square_units, QComboBox):
+                    units_value = str(square.get("units", square_units.currentText()))
+                    if square_units.findText(units_value) == -1:
+                        square_units.addItem(units_value)
+                    square_units.setCurrentText(units_value)
+            marker = target.get("marker_size", {})
+            if isinstance(marker, dict):
+                marker_size = self.__calibFields.get("marker_size")
+                if isinstance(marker_size, QDoubleSpinBox):
+                    marker_size.setValue(float(marker.get("value", marker_size.value())))
+
+        capture = params.get("capture", {})
+        if isinstance(capture, dict):
+            capture_mode = self.__calibFields.get("capture_mode")
+            if isinstance(capture_mode, QComboBox):
+                mode_value = str(capture.get("mode", "")).capitalize()
+                if mode_value and capture_mode.findText(mode_value) == -1:
+                    capture_mode.addItem(mode_value)
+                if mode_value:
+                    capture_mode.setCurrentText(mode_value)
+            required_samples = self.__calibFields.get("required_samples")
+            if isinstance(required_samples, QSpinBox):
+                required_samples.setValue(int(capture.get("required_samples", required_samples.value())))
+            stable_frames = self.__calibFields.get("stable_frames")
+            if isinstance(stable_frames, QSpinBox):
+                stable_frames.setValue(int(capture.get("stable_frames", stable_frames.value())))
+            min_interval = self.__calibFields.get("min_interval_s")
+            if isinstance(min_interval, QDoubleSpinBox):
+                min_interval.setValue(float(capture.get("min_interval_s", min_interval.value())))
+
+        quality = params.get("quality", {})
+        if isinstance(quality, dict):
+            min_corners = self.__calibFields.get("min_corners")
+            if isinstance(min_corners, QSpinBox):
+                min_corners.setValue(int(quality.get("min_corners", min_corners.value())))
+            blur_threshold = self.__calibFields.get("blur_threshold")
+            if isinstance(blur_threshold, QDoubleSpinBox):
+                blur_threshold.setValue(float(quality.get("blur_threshold", blur_threshold.value())))
+            edge_margin = self.__calibFields.get("edge_margin_px")
+            if isinstance(edge_margin, QSpinBox):
+                edge_margin.setValue(int(quality.get("edge_margin_px", edge_margin.value())))
+            min_target = self.__calibFields.get("min_target_size_pct")
+            if isinstance(min_target, QSpinBox):
+                min_target.setValue(int(quality.get("min_target_size_pct", min_target.value())))
+            max_target = self.__calibFields.get("max_target_size_pct")
+            if isinstance(max_target, QSpinBox):
+                max_target.setValue(int(quality.get("max_target_size_pct", max_target.value())))
+            max_reproj = self.__calibFields.get("max_reproj_error_px")
+            if isinstance(max_reproj, QDoubleSpinBox):
+                max_reproj.setValue(float(quality.get("max_reproj_error_px", max_reproj.value())))
+
+        output_view = params.get("output_view", {})
+        if isinstance(output_view, dict):
+            show_overlays = self.__calibFields.get("show_overlays")
+            if isinstance(show_overlays, QCheckBox):
+                show_overlays.setChecked(bool(output_view.get("show_overlays", show_overlays.isChecked())))
+            show_stats = self.__calibFields.get("show_stats")
+            if isinstance(show_stats, QCheckBox):
+                show_stats.setChecked(bool(output_view.get("show_stats", show_stats.isChecked())))
+            stream_view = self.__calibFields.get("stream_view")
+            if isinstance(stream_view, QComboBox):
+                view_value = str(output_view.get("stream_view", "")).capitalize()
+                if view_value and stream_view.findText(view_value) == -1:
+                    stream_view.addItem(view_value)
+                if view_value:
+                    stream_view.setCurrentText(view_value)
+
+        compute = params.get("compute", {})
+        if isinstance(compute, dict):
+            recompute = self.__calibFields.get("recompute_rectification")
+            if isinstance(recompute, QCheckBox):
+                recompute.setChecked(bool(compute.get("recompute_rectification", recompute.isChecked())))
+
+
+    def __persistCalibrationProfiles(self) -> None:
+        try:
+            raw = json.dumps(self.__calibProfiles)
+        except Exception as exc:
+            logging.error("Failed to serialize calibration profiles: %s", exc)
+            return
+        self.__settings.setValue("calibrationProfiles", raw)
+
+
+    def __loadCalibrationProfiles(self) -> None:
+        raw = self.__settings.value("calibrationProfiles", "", str)
+        profiles: dict[str, dict] = {}
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    profiles = loaded
+            except Exception as exc:
+                logging.error("Failed to load calibration profiles: %s", exc)
+        self.__calibProfiles = profiles
+        self.__calibProfileCombo.blockSignals(True)
+        self.__calibProfileCombo.clear()
+        for name in sorted(self.__calibProfiles.keys()):
+            self.__calibProfileCombo.addItem(name)
+        self.__calibProfileCombo.blockSignals(False)
+
+        last_profile = self.__settings.value("calibrationLastProfile", "", str)
+        if last_profile and last_profile in self.__calibProfiles:
+            self.__calibProfileCombo.setCurrentText(last_profile)
+            self.__applyCalibrationParams(self.__calibProfiles[last_profile])
+
+
+    def __saveCalibrationProfile(self) -> None:
+        name = self.__calibProfileName.text().strip() or self.__calibProfileCombo.currentText().strip()
+        if not name:
+            self.showErrorMessage("Provide a profile name before saving.")
+            return
+        self.__calibProfiles[name] = self.__collectCalibrationParams()
+        self.__persistCalibrationProfiles()
+        if self.__calibProfileCombo.findText(name) == -1:
+            self.__calibProfileCombo.addItem(name)
+        self.__calibProfileCombo.setCurrentText(name)
+        self.__settings.setValue("calibrationLastProfile", name)
+
+
+    def __loadCalibrationProfile(self) -> None:
+        name = self.__calibProfileName.text().strip() or self.__calibProfileCombo.currentText().strip()
+        if not name:
+            self.showErrorMessage("Select or enter a profile name to load.")
+            return
+        if name not in self.__calibProfiles:
+            self.showErrorMessage(f"No saved profile named '{name}'.")
+            return
+        self.__applyCalibrationParams(self.__calibProfiles[name])
+        self.__settings.setValue("calibrationLastProfile", name)
+
+
+    def __deleteCalibrationProfile(self) -> None:
+        name = self.__calibProfileCombo.currentText().strip()
+        if not name or name not in self.__calibProfiles:
+            return
+        self.__calibProfiles.pop(name, None)
+        self.__persistCalibrationProfiles()
+        index = self.__calibProfileCombo.findText(name)
+        if index != -1:
+            self.__calibProfileCombo.removeItem(index)
+        self.__calibProfileName.clear()
+
+
+    def __storeCalibrationResult(self) -> None:
+        self.calibrationStoreRequested.emit()
+
+
+    def __applyCalibrationToCamera(self) -> None:
+        params = self.__collectCalibrationParams()
+        self.stereoCalibrationApplyRequested.emit(params)
+
+
+    def __showDeviceVideoMenu(self, pos) -> None:
+        item = self.__deviceVideoList.itemAt(pos)
+        if item is None:
+            return
+        if not item.flags() & Qt.ItemFlag.ItemIsEnabled:
+            return
+        self.__deviceVideoList.setCurrentItem(item)
+        self.__deviceVideoList.setFocus()
+        self.__deviceVideoList.scrollToItem(item)
+        menu = QMenu(self)
+        load_action = menu.addAction("Load video")
+        delete_action = menu.addAction("Delete video")
+        action = menu.exec(self.__deviceVideoList.mapToGlobal(pos))
+        if action == load_action:
+            name = item.text().strip()
+            if name:
+                self.deviceVideoLoadRequested.emit(name)
+        elif action == delete_action:
+            name = item.text().strip()
+            if name:
+                self.deviceVideoDeleteRequested.emit(name)
+            return
+
+    def __dockFromHandle(self, tab_id: str) -> None:
+        if tab_id == "controls":
+            self.__dockControls()
+            return
+        if self.__controlsPopout is not None:
+            self.__dockControls()
+
+    def __onTearOffRequested(self, index: int, global_pos: QPoint) -> None:
+        tab = self.__tabs.widget(index)
+        if tab is self.__controlsTab:
+            self.__tearOffControls(global_pos)
+
+
+    def __tearOffControls(self, global_pos: QPoint | None = None) -> None:
+        if self.__controlsPopout is not None:
+            self.__controlsPopout.raise_()
+            self.__controlsPopout.activateWindow()
+            return
+
+        if self.__controlsTabIndex is None:
+            self.__controlsTabIndex = self.__tabs.indexOf(self.__controlsTab)
+        if self.__controlsTabIndex != -1:
+            self.__tabs.removeTab(self.__controlsTabIndex)
+
+        self.__controlsPopout = QDialog(self)
+        self.__controlsPopout.setWindowTitle(self.__controlsTabLabel)
+        self.__controlsPopout.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.__controlsPopout.setMinimumSize(520, 360)
+        self.__controlsPopout.setStyleSheet(
+            """
+            QDialog {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            """
+        )
+        if global_pos is not None:
+            self.__controlsPopout.move(global_pos - QPoint(80, 20))
+
+        popoutLayout = QVBoxLayout(self.__controlsPopout)
+        popoutLayout.setContentsMargins(12, 12, 12, 12)
+        popoutLayout.setSpacing(10)
+
+        handle = DockHandle(self.__controlsTabLabel, "controls", self.__controlsPopout)
+        popoutLayout.addWidget(handle, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.__controlsTab.setParent(self.__controlsPopout)
+        popoutLayout.addWidget(self.__controlsTab)
+        self.__controlsTab.show()
+        self.__controlsPopout.finished.connect(lambda _=None: self.__dockControls())
+        self.__controlsPopout.show()
+        self.__resizeControlsPopout()
+
+
+    def __resizeControlsPopout(self) -> None:
+        if self.__controlsPopout is None or not self.__controlsPopout.isVisible():
+            return
+        self.__controlsTab.adjustSize()
+        self.__controlsPopout.adjustSize()
+        self.__controlsPopout.resize(self.__controlsPopout.sizeHint())
+        self.__controlsPopout.updateGeometry()
+
+
+    def __dockControls(self) -> None:
+        if self.__controlsPopout is None:
+            return
+
+        popout = self.__controlsPopout
+        self.__controlsPopout = None
+
+        layout = popout.layout()
+        if layout is not None:
+            layout.removeWidget(self.__controlsTab)
+        self.__controlsTab.setParent(None)
+
+        if popout.isVisible():
+            popout.close()
+
+        insert_at = self.__controlsTabIndex if self.__controlsTabIndex is not None else self.__tabs.count()
+        if self.__tabs.indexOf(self.__controlsTab) == -1:
+            self.__tabs.insertTab(insert_at, self.__controlsTab, self.__controlsTabLabel)
+        new_index = self.__tabs.indexOf(self.__controlsTab)
+        if new_index != -1:
+            self.__tabBar.setTabData(new_index, "controls")
+        self.__tabs.setCurrentWidget(self.__controlsTab)
+
+
     def __uploadVideoClicked(self) -> None:
         text = self.__fileLineEdit.text()
         if text == "" or not os.path.isfile(text) or not text.lower().endswith(".mov"):
@@ -397,8 +1663,16 @@ class VideoStreamingWindow(QWidget):
         self.__showUploadProgress()
         self.uploadVideoClicked.emit(text)
         # TODO: wire real upload and call updateUploadProgress()/finishUploadProgress()
-        
-        
+
+
+    def __saveVideoOnDevice(self) -> None:
+        """Save the current frame as an image file."""
+        # Extract the name from the path (name only)
+        videoName : str = os.path.basename(self.__fileLineEdit.text())
+        logging.info(f"Saving video on device: {videoName}")
+        self.saveVideoOnDevice.emit(videoName)
+    
+
     def __startStreamOut(self) -> None:
         text = self.__fileLineEdit.text()
         if text == "" or not os.path.isfile(text) or not text.lower().endswith(".mov"):
@@ -435,10 +1709,76 @@ class VideoStreamingWindow(QWidget):
             self.__settings.setValue("lastFilePath", filenames[0])
 
 
+    def showErrorMessage(self, message: str) -> None:
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Error")
+        dlg.setIcon(QMessageBox.Icon.Critical)
+        dlg.setText(message)
+        dlg.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            QMessageBox QLabel {
+                color: #e8ecf3;
+            }
+            """
+        )
+        dlg.exec()
+        
+        
+    def showVideoSavedMessage(self) -> None:
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Video Saved")
+        dlg.setIcon(QMessageBox.Icon.Information)
+        dlg.setText("Video saved to device.")
+        dlg.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #0b111c;
+                color: #e8ecf3;
+            }
+            QMessageBox QLabel {
+                color: #e8ecf3;
+            }
+            """
+        )
+        dlg.exec()
+        
+        
+    def updateDeviceVideoList(self, loadedVideoName: str | list[str], video_list: list[str] | None = None) -> None:
+        """Update the device video list and preselect the loaded video when provided."""
+        if video_list is None and isinstance(loadedVideoName, list):
+            loaded_name = ""
+            video_names = loadedVideoName
+        else:
+            loaded_name = loadedVideoName or ""
+            video_names = video_list or []
+
+        self.__deviceVideoList.clear()
+        if not video_names:
+            placeholder = QListWidgetItem("No device videos loaded yet")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.__deviceVideoList.addItem(placeholder)
+            return
+
+        selected_item = None
+        for video_name in video_names:
+            if not video_name:
+                continue
+            item = QListWidgetItem(video_name)
+            self.__deviceVideoList.addItem(item)
+            if loaded_name and video_name == loaded_name:
+                selected_item = item
+        if selected_item is not None:
+            self.__deviceVideoList.setCurrentItem(selected_item)
+
+
     # ------------------------------------------------------------------
     # Call this when a new frame arrives (numpy array BGR)
     # ------------------------------------------------------------------
-    def updateFrame(self, frame: np.ndarray):
+    def updateFrame(self, frame: np.ndarray, GyroData:tuple[int, int, int]=None):
         if frame is None:
             return
 
@@ -505,16 +1845,57 @@ class VideoStreamingWindow(QWidget):
         self.updateFrame(stacked)
 
 
-    def __setViewMode(self, mode: str, emit_signal: bool = True) -> None:
-        if mode == self.__viewMode:
+    def __setStreamMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode not in self.__streamModeButtons:
             return
-        if mode not in self.__modeButtons:
+        same_mode = mode == self.__streamMode
+        if same_mode and emit_signal:
             return
-        self.__viewMode = mode
-        for key, btn in self.__modeButtons.items():
+        self.__streamMode = mode
+        for key, btn in self.__streamModeButtons.items():
             btn.setChecked(key == mode)
+        if hasattr(self, "_VideoStreamingWindow__stereoMonoCard"):
+            self.__stereoMonoCard.setVisible(mode == "stereo")
+            if mode == "stereo":
+                self.__setStereoMonoMode(self.__stereoMonoMode, emit_signal=emit_signal)
+        if hasattr(self, "_VideoStreamingWindow__simulationCard"):
+            self.__simulationCard.setVisible(mode == "training")
+        if hasattr(self, "_VideoStreamingWindow__calibrationCard") and mode != "stereo":
+            self.__calibrationCard.setVisible(False)
+        if mode != "stereo" and hasattr(self, "_VideoStreamingWindow__calibModeBtn"):
+            if self.__calibModeBtn.isChecked():
+                self.__calibModeBtn.setChecked(False)
+                self.__toggleCalibrationMode(emit_signal=emit_signal)
+        if emit_signal and mode == "training":
+            self.simulationSourceSelected.emit()
+        self.__resizeControlsPopout()
+
+
+    def __setStereoMonoMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode not in self.__stereoMonoButtons:
+            return
+        self.__stereoMonoMode = mode
+        for key, btn in self.__stereoMonoButtons.items():
+            btn.setChecked(key == mode)
+        if hasattr(self, "_VideoStreamingWindow__calibrationCard"):
+            self.__calibrationCard.setVisible(mode == "calibration")
+        if mode == "calibration":
+            if hasattr(self, "_VideoStreamingWindow__calibModeBtn"):
+                if not self.__calibModeBtn.isChecked():
+                    self.__calibModeBtn.setChecked(True)
+                    self.__toggleCalibrationMode(emit_signal=emit_signal)
+            if emit_signal:
+                self.__applyCalibrationToCamera()
+        else:
+            if hasattr(self, "_VideoStreamingWindow__calibModeBtn"):
+                if self.__calibModeBtn.isChecked():
+                    self.__calibModeBtn.setChecked(False)
+                    self.__toggleCalibrationMode(emit_signal=emit_signal)
+            if emit_signal:
+                self.stereoMonoModeChanged.emit("disparity")
         if emit_signal:
-            self.viewModeChanged.emit(mode)
+            self.cameraSourceSelected.emit(mode == "calibration")
+        self.__resizeControlsPopout()
 
 
     def __showUploadProgress(self):
@@ -574,4 +1955,5 @@ class VideoStreamingWindow(QWidget):
             return
         self.__uploadProgress.reset()
         self.__uploadProgress = None
+
 

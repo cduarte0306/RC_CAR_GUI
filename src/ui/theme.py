@@ -26,6 +26,10 @@ QWidget#content-card, QFrame#content-card {{
     border-radius: 18px;
 }}
 
+QWidget#content-card[role="main"], QFrame#content-card[role="main"] {{
+    border: none;
+}}
+
 #header-title {{
     font-size: 22px;
     font-weight: 700;

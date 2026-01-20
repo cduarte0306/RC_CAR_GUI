@@ -3,7 +3,8 @@ from utils.utilities import CircularBuffer
 
 from car_controls.VideoStreaming import VideoStreamer, FrameHeader
 from car_controls.controller import Controller
-from car_controls.CommandBus import CamCommands, CamStreamModes, CommandBus, Command, commands, CameraCommand
+from car_controls.CommandBus import (CamCommands, CamStreamSelectionModes,
+                                     CommandBus, Command, commands, CameraCommand, ReplyPayload, Reply)
 from network.NetworkManager import NetworkManager
 from network.udp_client import UDP
 
@@ -14,25 +15,37 @@ import re
 import ctypes
 
 from threading import Thread, Event
+import json
 import time
 import logging
 
+from utils.utilities import Signal
+
+
 
 class BackendIface(QThread):
-    videoBufferSignal       = pyqtSignal(object, object) # Frame received signal (left and right frames)
-    videoBufferSignalStereo = pyqtSignal(object, object) # Stereo frame received signal (left and right frames)
-    deviceDiscovered        = pyqtSignal(str)            # Device discovered signal (emits IP)
-    deviceConnected         = pyqtSignal(str)            # Device connected (emits IP)
-    deviceMacResolved       = pyqtSignal(str, str)       # Emits (ip, mac)
-    videoModeRequested      = pyqtSignal(str)            # Emits requested camera mode (regular/depth)
-    telemetryReceived       = pyqtSignal(bytes)          # Telemetry data received
-    videoUploadProgress     = pyqtSignal(int, int)       # Emitted during video file upload (sent bytes, total bytes)
-    videoUploadFinished     = pyqtSignal()               # Emitted when video upload is finished
-    commandReplyReceived    = pyqtSignal(bytes)          # Replies from command/ctrl socket
-    notifyDisconnect        = pyqtSignal()               # Notify UI of disconnection
-    controllerConnected     = pyqtSignal(str)            # Notify UI of controller connection
-    controllerBatteryLevel  = pyqtSignal(int)            # Notify UI of controller battery level
-    controllerDisconnected  = pyqtSignal()               # Notify UI of controller disconnection
+    videoBufferSignal           = pyqtSignal(object, object) # Frame received signal (left and right frames)
+    videoBufferSignalStereo     = pyqtSignal(object, object) # Stereo frame received signal (left and right frames)
+    videoBufferSignalStereoMono = pyqtSignal(object, object) # Stereo mono frame received signal (left frame and right frame as int)
+    deviceDiscovered            = pyqtSignal(str)            # Device discovered signal (emits IP)
+    deviceConnected             = pyqtSignal(str)            # Device connected (emits IP)
+    deviceMacResolved           = pyqtSignal(str, str)       # Emits (ip, mac)
+    videoModeRequested          = pyqtSignal(str)            # Emits requested camera mode (regular/depth)
+    telemetryReceived           = pyqtSignal(bytes)          # Telemetry data received
+    videoUploadProgress         = pyqtSignal(int, int)       # Emitted during video file upload (sent bytes, total bytes)
+    videoUploadFinished         = pyqtSignal()               # Emitted when video upload is finished
+    commandReplyReceived        = pyqtSignal(bytes)          # Replies from command/ctrl socket
+    notifyDisconnect            = pyqtSignal()               # Notify UI of disconnection
+    controllerConnected         = pyqtSignal(str)            # Notify UI of controller connection
+    controllerBatteryLevel      = pyqtSignal(int)            # Notify UI of controller battery level
+    controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
+    
+    # Status signals
+    videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
+    videoStoredToDevice         = pyqtSignal()               # Emitted when video is successfully stored on device
+    
+    # Error signals
+    failedToStoreVideoOnDevice  = pyqtSignal(str)  # Emitted when saving video on device fails
 
     CONTROLLER_PORT = 65000
     STREAM_PORT     = 5005
@@ -79,21 +92,30 @@ class BackendIface(QThread):
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
+        self.__videoStreamer.requestVideoSettings.connect(self.__setVideoSettings)
         self.__commandBus.replyReceived.connect(lambda reply: self.commandReplyReceived.emit(ctypes.string_at(ctypes.addressof(reply), ctypes.sizeof(reply))))
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
     
-        # Default to regular camera streaming mode
-        self.setStreamMode(False)
-        
+        # Default to disparity (normal) stereo streaming mode
+        self.setCameraSource(False)
+        self.setStereoMonoMode("disparity")
+        self.__setVideoSettings(100, 30)
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
         # Ping thread
         self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
         self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
         
+        # Callback signals
+        self.__videoSavedOnDeviceSignal = Signal(Reply)
+        self.__loadVideoNamesSignal     = Signal(Reply)
+
+        # Connect to reply callbacks
+        self.__videoSavedOnDeviceSignal.connect(self.__handleVideoSavedOnDeviceReply)
+        self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
     
     def __clearTimers(self) -> None:
         """
@@ -115,6 +137,7 @@ class BackendIface(QThread):
             if self.__disconnectTimer >= 5:  # 5 seconds timeout
                 logging.warning("No communication from device %s; assuming disconnected", self.__connected_ip)
                 self.__connected_ip = ""
+                self.__commandBus.flushReplyCache()
                 self.notifyDisconnect.emit()
                 self.__disconnectTimer = 0
                 break
@@ -243,14 +266,25 @@ class BackendIface(QThread):
         
         # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdClrVideoRec.value  # CmdSelMode on host
+        cam_cmd.command = CamCommands.CmdClrVideoRec.value  # CmdSelCameraStream on host
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_SET_MODE.value, 0, payload=cam_payload))
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+            
+            
+    def __setVideoSettings(self, quality: int, fps: int) -> None:
+        """
+        Set video settings on the camera
+
+        Args:
+            quality (int): _description_
+            fps (int): _description_
+        """
+        
     
     
     def __endingVideoTransmission(self) -> None:
@@ -259,29 +293,79 @@ class BackendIface(QThread):
         """
         logging.info("Video transmission ended")
         self.videoUploadFinished.emit()
-
-
-    def startStreamOut(self, state : bool, fileName:str) -> None:
-        print(state, fileName)
-        logging.info(f"Start stream out called with state={state}, fileName={fileName}")
-        streamStateMap = {
-            "streaminoff"  : 0,
-            "streaminon"   : 1,
-            "streamsim"    : 2,
-            "streamcamera" : 3
-        }
+        self.__loadStoredVideoList()
         
-        val : int = streamStateMap["streamsim"]  if state else streamStateMap["streaminoff"]
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = val
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        
+    def __handleCalibParamsReply(self, reply : Reply):
+        """
+        Handles replies from the calibration parameters command
 
+        """
+        
+        # Command the camera to clear the buffer before starting
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value  # CmdSelCameraStream on host
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # cam_payload = cam_payload + videoName.encode("utf-8")
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_SET_MODE.value, 0, payload=cam_payload))
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue camera mode command: %s", exc)
+            logging.error("Failed to enqueue camera calibration write parameters command: %s", exc)
+        
+        
+        
+    def __handleStoredVideoListReply(self, reply : Reply):
+        """
+        Handles replies from the load stored video names command
+
+        Args:
+            reply (Reply): Reply from host
+        """
+        status = reply.status()
+        if not status:
+            logging.error("Failed to load stored video list; status=%d", status)
+            return
+        
+        if not reply.payload():
+            logging.error("Failed to load stored video list; empty payload")
+            return
+
+        try:
+            videoListJson = reply.payload().decode("utf-8").rstrip("\x00")
+            videoListJson = json.loads(videoListJson)
+        except Exception as exc:
+            logging.error("Failed to parse stored video list payload: %s", exc)
+            return
+
+        loadedVideoName = videoListJson.get("loaded-video", "")
+        videoList = videoListJson.get("video-list", [])
+        if isinstance(videoList, str):
+            videoNames = [name for name in videoList.split(";") if name]
+        elif isinstance(videoList, list):
+            videoNames = [name for name in videoList if name]
+        else:
+            videoNames = []
+        logging.info("Loaded stored video list: %s", videoNames)
+        self.videoListLoaded.emit(loadedVideoName, videoNames)
+        
+        
+    def __handleVideoSavedOnDeviceReply(self, reply : Reply):
+        """
+        Handles replies from the video saved on device command
+
+        Args:
+            reply (Reply): Reply from host
+        """
+        status = reply.status()
+        if not status:
+            logging.error("Failed to save video on device; status=%d", status)
+            self.failedToStoreVideoOnDevice.emit(f"Failed to save video on device; status={status}")
+            return
+        
+        logging.info(f"Video successfully saved on device")
+        self.videoStoredToDevice.emit()
+        self.__loadStoredVideoList()
         
 
     @pyqtSlot(str)
@@ -296,57 +380,160 @@ class BackendIface(QThread):
         logging.info(f"Uploading video file to car: {fileName}")
         # Here you would implement the actual upload logic
         # For now, just log the action
-
-
+        
+        
     @pyqtSlot(bool)
-    def setStreamMode(self, enabled: bool) -> None:
-        """Enable or disable video streaming to the car."""
-        logging.info("Setting stream mode to: %s", "ENABLED" if enabled else "DISABLED")
-        self.startStreamOut(enabled, "")
+    def setCameraSource(self, calMode:bool) -> None:
+        """Set the camera source to either simulation or physical camera."""
+        logging.info("Requested camera source mode. calMode=%s", calMode)
+        extraCommand : dict = {
+            "calibration-mode": calMode
+        }
+        
+        extraCommandPayload = json.dumps(extraCommand).encode("utf-8")
         
         # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdStreamMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = CamStreamModes.StreamSim.value if enabled else CamStreamModes.StreamCamera.value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = CamStreamSelectionModes.StreamCameraSource.value
+        cam_cmd.payloadLen = len(extraCommandPayload)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + extraCommandPayload
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_SET_MODE.value, 0, payload=cam_payload))
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
+    
 
-
-    @pyqtSlot(str)
-    def setVideoMode(self, mode: str) -> None:
-        """Switch camera rendering mode (regular/depth/training) and send to car."""
-        mode_lc = (mode or "").lower()
-        mode_map = {
-            "regular": 0,  # CamModeNormal
-            "normal": 0,
-            "depth": 1,    # CamModeDepth
-            "training": 2  # CamModeTraining
-        }
-
-        if mode_lc not in mode_map:
-            logging.warning("Unknown camera mode requested: %s", mode)
-            return
-
-        value = mode_map[mode_lc]
-        logging.info("Requested video mode: %s (%d)", mode_lc, value)
-        self.videoModeRequested.emit(mode_lc)
-
+    @pyqtSlot()
+    def setSimulationSource(self) -> None:
+        """Set the camera source to either simulation or physical camera."""
+        logging.info("Requested simulation source mode")
+        
         # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelMode.value  # CmdSelMode on host
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = CamStreamSelectionModes.StreamSimSource.value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_SET_MODE.value, 0, payload=cam_payload))
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
+
+
+    @pyqtSlot(dict)
+    def setStereoCalibrationParams(self, params: dict) -> None:
+        """Apply stereo calibration parameters to the camera (UI stub)."""
+        if not params:
+            return
+        logging.info("Stereo calibration params requested: %s", params)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value
+        cam_cmd.payloadLen = len(json.dumps(params).encode("utf-8"))
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + json.dumps(params).encode("utf-8")
+        # Emit camera save video command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue save video command: %s", exc)
+
+
+    @pyqtSlot(bool)
+    def setCalibrationMode(self, active: bool) -> None:
+        """Start/stop calibration capture mode (UI stub)."""
+        logging.info("Calibration mode toggled: %s", "on" if active else "off")
+        mode_map = {
+            "normal": 0,      # CamModeNormal
+            "disparity": 1,   # CamModeDisparity
+            "calibration": 2  # CamModeCalibration
+        }
+
+        mode = "calibration"
+        logging.info("Setting camera mode to: %s", mode)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value
+        cam_cmd.data.u8 = mode_map[mode]
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # Emit camera save video command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue save video command: %s", exc)
+
+
+    @pyqtSlot()
+    def captureCalibrationSample(self) -> None:
+        """Request a calibration sample capture (UI stub)."""
+        logging.info("Calibration capture requested")
+
+    @pyqtSlot(bool)
+    def setCalibrationPaused(self, paused: bool) -> None:
+        """Pause/resume calibration capture (UI stub)."""
+        logging.info("Calibration paused: %s", "on" if paused else "off")
+
+    @pyqtSlot()
+    def abortCalibrationSession(self) -> None:
+        """Abort the current calibration session (UI stub)."""
+        logging.info("Calibration session aborted")
+
+    @pyqtSlot()
+    def resetCalibrationSamples(self) -> None:
+        """Reset captured calibration samples (UI stub)."""
+        logging.info("Calibration samples reset")
+
+
+    @pyqtSlot()
+    def storeCalibrationResult(self) -> None:
+        """Ask the host to persist the latest calibration results."""
+        logging.info("Calibration result store requested")
+        payload = json.dumps({"action": "store"}).encode("utf-8")
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdCalibrationSave.value
+        cam_cmd.payloadLen = len(payload)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue calibration store command: %s", exc)
+
+
+    def setSaveVideoOnDevice(self, videoName: str) -> None:
+        """Send command to save video on the device with the given name."""        
+        logging.info(f"Commanding video save")
+        
+        # Build nested CameraCommand payload
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSaveVideo.value  # hypothetical command
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # Emit camera save video command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__videoSavedOnDeviceSignal))
+        except Exception as exc:
+            logging.error("Failed to enqueue save video command: %s", exc)
+
+
+
+    def setStereoMonoMode(self, mode: str) -> None:
+        """Set stereo-mono render mode (normal/disparity) on the camera."""
+        mode_map = {
+            "normal": 0,     # CamModeNormal
+            "disparity": 1,  # CamModeDisparity
+        }
+        if mode not in mode_map:
+            logging.warning("Unknown stereo-mono mode requested: %s", mode)
+            return
+
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSelCameraStream.value
+        cam_cmd.data.u8 = mode_map[mode]
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue stereo-mono mode command: %s", exc)
 
 
     def connectToDevice(self, ip: str) -> None:
@@ -376,6 +563,62 @@ class BackendIface(QThread):
         
         # Start disconnect timer
         self.__disconnectTimerObj.start()
+        
+        # Load the list of stored videos from the device
+        self.__loadStoredVideoList()
+        
+        # Select default video mode
+        self.setVideoMode("normal")
+        
+    
+    def __loadStoredVideoList(self) -> None:
+        """Load the list of stored videos from the device."""
+        # Build nested CameraCommand payload
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdLoadStoredVideos.value  # hypothetical command
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # Emit camera load stored videos command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
+        except Exception as exc:
+            logging.error("Failed to enqueue load stored videos command: %s", exc)
+
+
+    @pyqtSlot(str)
+    def loadDeviceVideo(self, videoName: str) -> None:
+        """Request the device to load a stored video by name."""
+        if not videoName:
+            logging.warning("No device video name provided")
+            return
+
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdLoadSelectedVideo.value
+        cam_cmd.payloadLen = len(videoName)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + videoName.encode("utf-8")
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue load selected video command: %s", exc)
+            
+            
+    @pyqtSlot(str)
+    def deleteDeviceVideo(self, videoName: str) -> None:
+        """Request the device to delete a stored video by name."""
+        if not videoName:
+            logging.warning("No device video name provided")
+            return
+
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdDeleteVideo.value
+        cam_cmd.payloadLen = len(videoName)
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        cam_payload = cam_payload + videoName.encode("utf-8")
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
+            self.__loadStoredVideoList()
+        except Exception as exc:
+            logging.error("Failed to enqueue delete video command: %s", exc)
 
 
     def getDevices(self) -> list:
@@ -402,7 +645,6 @@ class BackendIface(QThread):
         """
         Main UI interface thread
         """
-        
         while True:
             frame = self.__videoStreamer.getFrameIn()
             if frame is not None:
@@ -412,7 +654,12 @@ class BackendIface(QThread):
             frameStereo = self.__videoStreamer.getFrameBufferInStereo()
             if frameStereo is not None:
                 self.__clearTimers()
-                self.videoBufferSignalStereo.emit(frameStereo, None)  # stacked stereo frame    
+                self.videoBufferSignalStereo.emit(frameStereo, None)  # stacked stereo frame
+                
+            frameStereoMono = self.__videoStreamer.getFrameBufferInStereoMono()
+            if frameStereoMono is not None:
+                self.__clearTimers()
+                self.videoBufferSignalStereoMono.emit(frameStereoMono[0], frameStereoMono[1])  # left frame and right frame as int
 
             if self.__tlmBuffer.empty() == False:
                 self.__clearTimers()
