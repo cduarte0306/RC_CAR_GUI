@@ -53,10 +53,12 @@ class CameraCommand(ctypes.Structure):
     ]
     
 class CamCommands(Enum):
-    CmdSetFrameRate         = 0
-    CmdStartStream          = auto()
+    CmdStartStream          = 0
     CmdStopStream           = auto()
     CmdSelCameraStream      = auto()
+    CmdSetFps               = auto()
+    CmdSetQuality           = auto()
+    CmdRdParams             = auto()
     CmdClrVideoRec          = auto()
     CmdSaveVideo            = auto()
     CmdLoadStoredVideos     = auto()

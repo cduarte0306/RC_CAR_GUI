@@ -39,6 +39,7 @@ class BackendIface(QThread):
     controllerConnected         = pyqtSignal(str)            # Notify UI of controller connection
     controllerBatteryLevel      = pyqtSignal(int)            # Notify UI of controller battery level
     controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
+    paramsLoaded                = pyqtSignal(dict)          # Emitted when calibration parameters are loaded
     
     # Status signals
     videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
@@ -84,6 +85,8 @@ class BackendIface(QThread):
         self.__devicesPool : list  = []
         self.__connected_ip : str = ""
         self.__mac_cache : dict = {}
+        self.__streamQuality: int = 75
+        self.__streamFps: int = 30
 
         # Connect signals
         # Forward discovered host IPs to the UI with the IP string
@@ -92,7 +95,6 @@ class BackendIface(QThread):
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
-        self.__videoStreamer.requestVideoSettings.connect(self.__setVideoSettings)
         self.__commandBus.replyReceived.connect(lambda reply: self.commandReplyReceived.emit(ctypes.string_at(ctypes.addressof(reply), ctypes.sizeof(reply))))
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
@@ -102,20 +104,24 @@ class BackendIface(QThread):
         # Default to disparity (normal) stereo streaming mode
         self.setCameraSource(False)
         self.setStereoMonoMode("disparity")
-        self.__setVideoSettings(100, 30)
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
         # Ping thread
         self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
         self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
         
+        self.__pingShutdownEvent = Event()
+        
         # Callback signals
         self.__videoSavedOnDeviceSignal = Signal(Reply)
         self.__loadVideoNamesSignal     = Signal(Reply)
+        self.__loadParamsSignal         = Signal(Reply)
 
         # Connect to reply callbacks
         self.__videoSavedOnDeviceSignal.connect(self.__handleVideoSavedOnDeviceReply)
         self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
+        self.__loadParamsSignal.connect(self.__handleParamsReply)
+
     
     def __clearTimers(self) -> None:
         """
@@ -131,7 +137,7 @@ class BackendIface(QThread):
         if self.__connected_ip == "":
             return
         
-        while True:
+        while self.__pingShutdownEvent.is_set() == False:
             time.sleep(1)
             self.__disconnectTimer += 1
             if self.__disconnectTimer >= 5:  # 5 seconds timeout
@@ -140,6 +146,7 @@ class BackendIface(QThread):
                 self.__commandBus.flushReplyCache()
                 self.notifyDisconnect.emit()
                 self.__disconnectTimer = 0
+                self.__pingShutdownEvent.set()
                 break
 
 
@@ -275,17 +282,6 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
             
-            
-    def __setVideoSettings(self, quality: int, fps: int) -> None:
-        """
-        Set video settings on the camera
-
-        Args:
-            quality (int): _description_
-            fps (int): _description_
-        """
-        
-    
     
     def __endingVideoTransmission(self) -> None:
         """
@@ -295,24 +291,32 @@ class BackendIface(QThread):
         self.videoUploadFinished.emit()
         self.__loadStoredVideoList()
         
-        
-    def __handleCalibParamsReply(self, reply : Reply):
+    
+    def __handleParamsReply(self, reply : Reply):
         """
-        Handles replies from the calibration parameters command
+        Handles replies from the load calibration parameters command
+        Args:
+            reply (Reply): Reply from host
+        """
+        status = reply.status()
+        if not status:
+            logging.error("Failed to load calibration parameters; status=%d", status)
+            return
+        
+        if not reply.payload():
+            logging.error("Failed to load calibration parameters; empty payload")
+            return
 
-        """
-        
-        # Command the camera to clear the buffer before starting
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value  # CmdSelCameraStream on host
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        # cam_payload = cam_payload + videoName.encode("utf-8")
-        # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            paramsJson = reply.payload().decode("utf-8").rstrip("\x00")
+            params = json.loads(paramsJson)
         except Exception as exc:
-            logging.error("Failed to enqueue camera calibration write parameters command: %s", exc)
-        
+            logging.error("Failed to parse calibration parameters payload: %s", exc)
+            return
+
+        logging.info("Loaded calibration parameters: %s", params)
+        # Here you would typically emit a signal or store the params for UI consumption
+        self.paramsLoaded.emit(params)
         
         
     def __handleStoredVideoListReply(self, reply : Reply):
@@ -367,6 +371,23 @@ class BackendIface(QThread):
         self.videoStoredToDevice.emit()
         self.__loadStoredVideoList()
         
+        
+    @pyqtSlot(bool)
+    def startVideoStream(self, enable: bool) -> None:
+        """Start or stop video streaming to the car."""
+        logging.info("Video transmission starting")
+        
+        # Command the camera to clear the buffer before starting
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdStartStream.value if enable else CamCommands.CmdStopStream.value  # CmdSelCameraStream on host
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        
+        # Emit camera mode command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+
 
     @pyqtSlot(str)
     def uploadVideoFile(self, fileName: str) -> None:
@@ -559,17 +580,64 @@ class BackendIface(QThread):
         self.deviceMacResolved.emit(ip, mac if mac else "")
         
         # Start the constant ping thread to keep connection alive
-        self.__ping_thread.start()
+        if not self.__ping_thread.is_alive():
+            self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
+            self.__ping_thread.start()
         
         # Start disconnect timer
-        self.__disconnectTimerObj.start()
+        if not self.__disconnectTimerObj.is_alive():
+            self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
+            self.__disconnectTimerObj.start()
         
         # Load the list of stored videos from the device
         self.__loadStoredVideoList()
+        self.__loadParams()
+        self.startVideoStream(True)
         
-        # Select default video mode
-        self.setVideoMode("normal")
+    
+    def setFrameRate(self, fps: int) -> None:
+        """
+        Set frame rate on the camera
+
+        Args:
+            fps (int): Frames per second
+        """
+        logging.info("Setting frame rate to %d fps", fps)
+
+        # Command the camera to clear the buffer before starting
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetFps.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = fps
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
+        # Emit camera mode command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+            
+            
+    def setVideoQuality(self, quality: int) -> None:
+        """
+        Set video settings on the camera
+
+        Args:
+            quality (int): _description_
+        """
+        logging.info("Setting video quality to %d", quality)
+    
+        # Command the camera to clear the buffer before starting
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetQuality.value  # CmdSelCameraStream on host
+        cam_cmd.data.u8 = quality
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        
+        # Emit camera mode command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+    
     
     def __loadStoredVideoList(self) -> None:
         """Load the list of stored videos from the device."""
@@ -582,6 +650,19 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
         except Exception as exc:
             logging.error("Failed to enqueue load stored videos command: %s", exc)
+            
+            
+    def __loadParams(self) -> None:
+        """Load calibration parameters from the device."""
+        # Build nested CameraCommand payload
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdRdParams.value  # hypothetical command
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        # Emit camera load stored videos command to the controller bus, with appended payload
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadParamsSignal))
+        except Exception as exc:
+            logging.error("Failed to enqueue load calibration parameters command: %s", exc)
 
 
     @pyqtSlot(str)
@@ -632,13 +713,16 @@ class BackendIface(QThread):
     
     
     def __ping_loop(self):
-        while True:
+        while not self.__pingShutdownEvent.is_set():
             if self.__connected_ip:
                 try:
                     self.__commandBus.submit(Command(commands.CMD_NOOP.value, 0))
                 except Exception as exc:
                     logging.error("Failed to enqueue ping command: %s", exc)
             time.sleep(2)
+            
+        self.__pingShutdownEvent.clear()
+        logging.info("Ping thread exiting")
 
 
     def run(self):

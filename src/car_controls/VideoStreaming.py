@@ -315,16 +315,16 @@ class VideoStreamer:
             if frameErrCounter == 0:
                 continue
 
-            errRatio : float = (frameOkCounter / frameErrCounter)
-            if errRatio < 50 and receivedFrames >= 100:
-                frameOkCounter = 0
-                frameErrCounter = 0
-                receivedFrames = 0
+            # errRatio : float = (frameOkCounter / frameErrCounter)
+            # if errRatio < 50 and receivedFrames >= 100:
+            #     frameOkCounter = 0
+            #     frameErrCounter = 0
+            #     receivedFrames = 0
                 
-                # Lower quality to try to reduce bandwidth
-                qualitySetting -= 10
+            #     # Lower quality to try to reduce bandwidth
+            #     qualitySetting -= 10
                 
-                self.requestVideoSettings.emit(qualitySetting, fpsSetting)  # Lower quality, higher compression
+            #     self.requestVideoSettings.emit(qualitySetting, fpsSetting)  # Lower quality, higher compression
             
             logging.debug(f"Frame OK: {frameOkCounter}, Frame Errors: {frameErrCounter}")
 
