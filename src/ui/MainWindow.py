@@ -668,12 +668,15 @@ class MainWindow(QMainWindow):
         self.__consumer.failedToStoreVideoOnDevice.connect(self.__streamWindow.showErrorMessage)
         self.__consumer.videoStoredToDevice.connect(self.__streamWindow.showVideoSavedMessage)
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
+        self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
         
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)
         self.__streamWindow.simulationSourceSelected.connect(self.__consumer.setSimulationSource)
+        self.__streamWindow.fpsChanged.connect(self.__consumer.setFrameRate)
+        self.__streamWindow.qualityChanged.connect(self.__consumer.setVideoQuality)
+        self.__streamWindow.streamOutRequested.connect(self.__consumer.startVideoStream)
         self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
-        # self.__streamWindow.calibrationModeToggled.connect(self.__consumer.setCalibrationMode)
         self.__streamWindow.calibrationCaptureRequested.connect(self.__consumer.captureCalibrationSample)
         self.__streamWindow.calibrationPauseToggled.connect(self.__consumer.setCalibrationPaused)
         self.__streamWindow.calibrationAbortRequested.connect(self.__consumer.abortCalibrationSession)
@@ -823,6 +826,7 @@ class MainWindow(QMainWindow):
         self.side.btnGPS.setEnabled(True)
         self.__setStatusChip(f"Connected - {ip}", "connected")
         self.__welcomeWindow.setStartButtonState(False)
+        self.__streamWindow.autoStartStreamOut()
         # Visually mark the connected device in the welcome panel
         if hasattr(self.__welcomeWindow, "_devices_layout"):
             for i in range(self.__welcomeWindow._devices_layout.count()):

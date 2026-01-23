@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
     QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
     QApplication, QListWidget, QListWidgetItem, QMenu, QSpinBox, QDoubleSpinBox,
-    QFormLayout, QScrollArea, QCheckBox
+    QFormLayout, QScrollArea, QCheckBox, QSlider
 )
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor
 from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData
@@ -212,6 +212,9 @@ class DockHandle(QFrame):
 class VideoStreamingWindow(QWidget):
 
     startStreamOut             = pyqtSignal(bool, str) # File selected signals
+    streamOutRequested         = pyqtSignal(bool, str) # Start/stop outbound stream request
+    fpsChanged                 = pyqtSignal(int)       # Emitted when FPS selection changes
+    qualityChanged             = pyqtSignal(int)       # Emitted when quality slider is released
     cameraSourceSelected       = pyqtSignal(bool)      # calibration mode on/off for camera source
     simulationSourceSelected   = pyqtSignal()          # request simulation source
     stereoMonoModeChanged      = pyqtSignal(str)       # "normal", "disparity"
@@ -320,6 +323,83 @@ class VideoStreamingWindow(QWidget):
         self.__videoLabel.setPixmap(placeholder)
 
         viewerLayout.addWidget(self.__videoLabel)
+
+        videoControlCard = QFrame()
+        videoControlCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);"
+        )
+        videoControlLayout = QHBoxLayout(videoControlCard)
+        videoControlLayout.setContentsMargins(12, 8, 12, 8)
+        videoControlLayout.setSpacing(12)
+
+        fpsTitle = QLabel("FPS")
+        fpsTitle.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__fpsCombo = QComboBox()
+        self.__fpsCombo.addItems(["5", "10", "15", "20", "25", "30", "45", "60"])
+        self.__fpsCombo.setCurrentText("30")
+        self.__fpsCombo.setFixedWidth(80)
+        self.__fpsCombo.setStyleSheet(
+            """
+            QComboBox {
+                background-color: rgba(255,255,255,0.1);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.18);
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+                padding-right: 24px;
+            }
+            QComboBox:hover {
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 22px;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+            }
+            """
+        )
+
+        qualityLabel = QLabel("Quality")
+        qualityLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__qualitySlider = QSlider(Qt.Orientation.Horizontal)
+        self.__qualitySlider.setRange(0, 100)
+        self.__qualitySlider.setValue(75)
+        self.__qualitySlider.setSingleStep(1)
+        self.__qualitySlider.setPageStep(5)
+        self.__qualitySlider.setStyleSheet(
+            """
+            QSlider::groove:horizontal {
+                border: 1px solid rgba(255,255,255,0.15);
+                height: 6px;
+                background: rgba(255,255,255,0.08);
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: rgba(0,210,255,0.7);
+                border: 1px solid rgba(0,210,255,0.9);
+                width: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(0,210,255,0.3);
+                border-radius: 4px;
+            }
+            """
+        )
+        self.__qualityValueLabel = QLabel(str(self.__qualitySlider.value()))
+        self.__qualityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        videoControlLayout.addWidget(fpsTitle)
+        videoControlLayout.addWidget(self.__fpsCombo)
+        videoControlLayout.addSpacing(12)
+        videoControlLayout.addWidget(qualityLabel)
+        videoControlLayout.addWidget(self.__qualitySlider, stretch=1)
+        videoControlLayout.addWidget(self.__qualityValueLabel)
+        viewerLayout.addWidget(videoControlCard)
         self.__tabs.addTab(viewerTab, "Viewer")
 
         # Controls tab
@@ -631,6 +711,8 @@ class VideoStreamingWindow(QWidget):
         )
         
         self.__fpsSel.setFixedWidth(80)
+        self.__fpsSel.currentTextChanged.connect(self.__syncFpsCombos)
+        self.__fpsCombo.currentTextChanged.connect(self.__syncFpsCombos)
         
         self.__startIcon = QIcon("icons/play-icon.svg")
         self.__pauseIcon = QIcon("icons/pause-icon.svg")
@@ -1219,6 +1301,8 @@ class VideoStreamingWindow(QWidget):
         self.__calibResetBtn.clicked.connect(self.__resetCalibrationSamples)
         self.__calibStoreBtn.clicked.connect(self.__storeCalibrationResult)
         self.__calibProfileCombo.currentTextChanged.connect(self.__syncCalibrationProfileName)
+        self.__qualitySlider.valueChanged.connect(self.__updateQualityLabel)
+        self.__qualitySlider.sliderReleased.connect(self.__emitQualityChanged)
         
         # Default stream mode
         self.__setStreamMode(self.__streamMode, emit_signal=False)
@@ -1232,6 +1316,37 @@ class VideoStreamingWindow(QWidget):
             self.__activeFileLabel.setText("Active file: none")
         else:
             self.__activeFileLabel.setText(f"Active file: {name}")
+
+    def updateFpsDisplay(self, fps_text: str) -> None:
+        if hasattr(self, "_VideoStreamingWindow__fpsCombo") and str(fps_text).isdigit():
+            if self.__fpsCombo.findText(str(fps_text)) != -1:
+                self.__fpsCombo.blockSignals(True)
+                self.__fpsSel.blockSignals(True)
+                self.__fpsCombo.setCurrentText(str(fps_text))
+                self.__fpsSel.setCurrentText(str(fps_text))
+                self.__fpsSel.blockSignals(False)
+                self.__fpsCombo.blockSignals(False)
+
+    def __updateQualityLabel(self, value: int) -> None:
+        self.__qualityValueLabel.setText(str(value))
+
+    def __emitQualityChanged(self) -> None:
+        self.qualityChanged.emit(int(self.__qualitySlider.value()))
+
+    def __syncFpsCombos(self, value: str) -> None:
+        if not hasattr(self, "_VideoStreamingWindow__fpsCombo") or not hasattr(self, "_VideoStreamingWindow__fpsSel"):
+            return
+        sender = self.sender()
+        target = self.__fpsSel if sender is self.__fpsCombo else self.__fpsCombo
+        if target.currentText() == value:
+            return
+        target.blockSignals(True)
+        target.setCurrentText(value)
+        target.blockSignals(False)
+        try:
+            self.fpsChanged.emit(int(value))
+        except ValueError:
+            return
 
     def updateCalibrationStats(self, count_text: str | None, status_text: str | None) -> None:
         if hasattr(self, "_VideoStreamingWindow__calibCountLabel") and count_text:
@@ -1690,6 +1805,21 @@ class VideoStreamingWindow(QWidget):
             self.__startStreamOutBtn.setToolTip("Start outbound stream")
             self.__isPlaying = False
         self.startStreamOut.emit(self.__isPlaying, self.__fileLineEdit.text())
+        self.streamOutRequested.emit(self.__isPlaying, self.__fileLineEdit.text())
+
+    def autoStartStreamOut(self) -> None:
+        if self.__isPlaying:
+            return
+        text = self.__fileLineEdit.text()
+        if text == "" or not os.path.isfile(text) or not text.lower().endswith(".mov"):
+            logging.info("No valid .MOV file selected for auto-start")
+            return
+        self.__settings.setValue("lastFilePath", text)
+        self.__startStreamOutBtn.setAllIcons(self.__pauseIcon)
+        self.__startStreamOutBtn.setToolTip("Pause outbound stream")
+        self.__isPlaying = True
+        self.startStreamOut.emit(True, self.__fileLineEdit.text())
+        self.streamOutRequested.emit(True, self.__fileLineEdit.text())
 
 
     def __openFileDialog(self) -> None:
@@ -1773,6 +1903,22 @@ class VideoStreamingWindow(QWidget):
                 selected_item = item
         if selected_item is not None:
             self.__deviceVideoList.setCurrentItem(selected_item)
+            
+            
+    def updateSettingsFromParams(self, params: dict) -> None:
+        """Update UI settings based on provided parameters dictionary."""
+        quality = params.get("quality")
+        if isinstance(quality, int):
+            self.__qualitySlider.setValue(quality)
+        fps = params.get("fps")
+        if isinstance(fps, int):
+            self.updateFpsDisplay(str(fps))
+        stream_mode = params.get("stream_mode")
+        if isinstance(stream_mode, str):
+            self.__setStreamMode(stream_mode)
+        stereo_mono_mode = params.get("stereo_mono_mode")
+        if isinstance(stereo_mono_mode, str):
+            self.__setStereoMonoMode(stereo_mono_mode)
 
 
     # ------------------------------------------------------------------
