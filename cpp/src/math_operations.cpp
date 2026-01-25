@@ -1,4 +1,5 @@
 #include "math_operations.h"
+#include <algorithm>
 #include <cmath>
 
 namespace rc_car {

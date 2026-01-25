@@ -87,6 +87,46 @@
                 "panel": "new"
             },
             "detail": "Build and run standalone C++ tests"
+        },
+        {
+            "label": "Build C++ App (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Debug",
+                "--target",
+                "rc_car_app"
+            ],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Build the standalone C++ app for debugging"
+        },
+        {
+            "label": "Build C++ App (Release)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Release",
+                "--target",
+                "rc_car_app"
+            ],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Build the standalone C++ app for release testing"
         }
     ]
 }

@@ -218,12 +218,16 @@ class VideoStreamingWindow(QWidget):
     cameraSourceSelected       = pyqtSignal(bool)      # calibration mode on/off for camera source
     simulationSourceSelected   = pyqtSignal()          # request simulation source
     stereoMonoModeChanged      = pyqtSignal(str)       # "normal", "disparity"
+    disparityRenderModeChanged = pyqtSignal(str)       # "depth", "disparity"
+    numDisparitiesChanged      = pyqtSignal(int)       # Emitted when num disparities slider is released
+    blockSizeChanged           = pyqtSignal(int)       # Emitted when block size slider is released
     uploadVideoClicked         = pyqtSignal(str)       # File selected signal
     deviceVideoLoadRequested   = pyqtSignal(str)       # Device video selection signal
     deviceVideoDeleteRequested = pyqtSignal(str)       # Device video deletion signal
     setNormalMode              = pyqtSignal()
     setDisparityMode           = pyqtSignal()
     saveVideoOnDevice          = pyqtSignal(str)       # Signal to save video on device
+    recordingStateChanged      = pyqtSignal(bool, str) # Local recording state + path
     stereoCalibrationApplyRequested = pyqtSignal(dict)  # Apply calibration parameters to camera
     calibrationModeToggled     = pyqtSignal(bool)      # Start/stop calibration mode
     calibrationCaptureRequested = pyqtSignal()         # Capture a calibration sample
@@ -237,6 +241,7 @@ class VideoStreamingWindow(QWidget):
 
         # Persist user-selected file path across app restarts
         self.__settings = QSettings("RC_CAR_GUI", "VideoStreaming")
+        self.__recordPath = self.__settings.value("recordPath", "", str)
 
         # Ensure the viewport has space before first frame arrives
         self.setMinimumSize(640, 480)
@@ -252,6 +257,30 @@ class VideoStreamingWindow(QWidget):
         title.setObjectName("card-title")
         header.addWidget(title)
         header.addStretch()
+        self.__recordBtn = QPushButton("REC")
+        self.__recordBtn.setFixedHeight(28)
+        self.__recordBtn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.__recordBtn.setToolTip("Start recording to disk")
+        self.__recordBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(210, 45, 45, 0.85);
+                color: #fff;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                padding: 4px 10px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover {
+                background-color: rgba(230, 65, 65, 0.95);
+            }
+            QPushButton:pressed {
+                background-color: rgba(190, 35, 35, 0.95);
+            }
+            """
+        )
+        header.addWidget(self.__recordBtn)
 
         self.__streamMode = "stereo"
         self.__streamModeButtons: dict[str, QPushButton] = {}
@@ -261,6 +290,7 @@ class VideoStreamingWindow(QWidget):
         self.__stereoMonoButtons: dict[str, QPushButton] = {}
         self.__stereoMonoGroup = QButtonGroup(self)
         self.__stereoMonoGroup.setExclusive(True)
+        self.__disparityRenderMode = "depth"
         root.addLayout(header)
 
         # Tabs
@@ -324,13 +354,43 @@ class VideoStreamingWindow(QWidget):
 
         viewerLayout.addWidget(self.__videoLabel)
 
+        recordPathRow = QHBoxLayout()
+        recordPathRow.setSpacing(8)
+        recordPathLabel = QLabel("Record path")
+        recordPathLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__recordPathEdit = QLineEdit()
+        self.__recordPathEdit.setPlaceholderText("Select a folder for recordings")
+        if self.__recordPath:
+            self.__recordPathEdit.setText(self.__recordPath)
+        self.__recordPathEdit.setMinimumHeight(30)
+        self.__recordPathEdit.setStyleSheet("padding: 6px 10px; font-size: 12px;")
+        self.__recordBrowseBtn = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(20, 20))
+        self.__recordBrowseBtn.setFixedSize(30, 30)
+        self.__recordBrowseBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            """
+        )
+        recordPathRow.addWidget(recordPathLabel)
+        recordPathRow.addWidget(self.__recordPathEdit, stretch=1)
+        recordPathRow.addWidget(self.__recordBrowseBtn)
+        viewerLayout.addLayout(recordPathRow)
+
         videoControlCard = QFrame()
         videoControlCard.setStyleSheet(
             "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);"
         )
-        videoControlLayout = QHBoxLayout(videoControlCard)
-        videoControlLayout.setContentsMargins(12, 8, 12, 8)
-        videoControlLayout.setSpacing(12)
+        videoControlLayout = QVBoxLayout(videoControlCard)
+        videoControlLayout.setContentsMargins(12, 6, 12, 6)
+        videoControlLayout.setSpacing(6)
 
         fpsTitle = QLabel("FPS")
         fpsTitle.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
@@ -393,12 +453,111 @@ class VideoStreamingWindow(QWidget):
         self.__qualityValueLabel = QLabel(str(self.__qualitySlider.value()))
         self.__qualityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        videoControlLayout.addWidget(fpsTitle)
-        videoControlLayout.addWidget(self.__fpsCombo)
-        videoControlLayout.addSpacing(12)
-        videoControlLayout.addWidget(qualityLabel)
-        videoControlLayout.addWidget(self.__qualitySlider, stretch=1)
-        videoControlLayout.addWidget(self.__qualityValueLabel)
+        disparitiesLabel = QLabel("Disparities")
+        disparitiesLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__disparitiesSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__disparitiesSlider.setRange(8, 128)
+        self.__disparitiesSlider.setValue(64)
+        self.__disparitiesSlider.setSingleStep(1)
+        self.__disparitiesSlider.setPageStep(8)
+        self.__disparitiesSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__disparitiesValueLabel = QLabel(str(self.__disparitiesSlider.value()))
+        self.__disparitiesValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        blockLabel = QLabel("Block Size")
+        blockLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__blockSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__blockSlider.setRange(5, 21)
+        self.__blockSlider.setValue(5)
+        self.__blockSlider.setSingleStep(1)
+        self.__blockSlider.setPageStep(2)
+        self.__blockSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__blockValueLabel = QLabel(str(self.__blockSlider.value()))
+        self.__blockValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        renderLabel = QLabel("RGB Depth")
+        renderLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__disparityRenderButtons: dict[str, QPushButton] = {}
+        self.__disparityRenderGroup = QButtonGroup(self)
+        self.__disparityRenderGroup.setExclusive(True)
+        for mode, label in (
+            ("depth", "On"),
+            ("disparity", "Off"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(255,255,255,0.06);
+                    color: #e8ecf3;
+                    border: 1px solid rgba(255,255,255,0.12);
+                    border-radius: 8px;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(0,210,255,0.14);
+                    border: 1px solid rgba(0,210,255,0.32);
+                }
+                QPushButton:checked {
+                    background-color: rgba(0,210,255,0.18);
+                    border: 1px solid rgba(0,210,255,0.65);
+                    color: #0fd3ff;
+                }
+                """
+            )
+            btn.clicked.connect(lambda checked, m=mode: self.__setDisparityRenderMode(m))
+            self.__disparityRenderGroup.addButton(btn)
+            self.__disparityRenderButtons[mode] = btn
+        self.__disparityRenderButtons[self.__disparityRenderMode].setChecked(True)
+
+        for widget in (fpsTitle, self.__fpsCombo, qualityLabel, self.__qualityValueLabel,
+                       disparitiesLabel, self.__disparitiesValueLabel, blockLabel, self.__blockValueLabel,
+                       renderLabel):
+            widget.setFixedHeight(18)
+        for slider in (self.__qualitySlider, self.__disparitiesSlider, self.__blockSlider):
+            slider.setFixedHeight(18)
+        for value_label in (self.__qualityValueLabel, self.__disparitiesValueLabel, self.__blockValueLabel):
+            value_label.setFixedWidth(36)
+
+        fpsRow = QHBoxLayout()
+        fpsRow.setSpacing(8)
+        fpsRow.addWidget(fpsTitle)
+        fpsRow.addWidget(self.__fpsCombo)
+        fpsRow.addStretch()
+
+        qualityRow = QHBoxLayout()
+        qualityRow.setSpacing(8)
+        qualityRow.addWidget(qualityLabel)
+        qualityRow.addWidget(self.__qualitySlider, stretch=1)
+        qualityRow.addWidget(self.__qualityValueLabel)
+
+        disparitiesRow = QHBoxLayout()
+        disparitiesRow.setSpacing(8)
+        disparitiesRow.addWidget(disparitiesLabel)
+        disparitiesRow.addWidget(self.__disparitiesSlider, stretch=1)
+        disparitiesRow.addWidget(self.__disparitiesValueLabel)
+
+        blockRow = QHBoxLayout()
+        blockRow.setSpacing(8)
+        blockRow.addWidget(blockLabel)
+        blockRow.addWidget(self.__blockSlider, stretch=1)
+        blockRow.addWidget(self.__blockValueLabel)
+
+        renderRow = QHBoxLayout()
+        renderRow.setSpacing(8)
+        renderRow.addWidget(renderLabel)
+        renderRow.addStretch()
+        renderRow.addWidget(self.__disparityRenderButtons["depth"])
+        renderRow.addWidget(self.__disparityRenderButtons["disparity"])
+
+        videoControlLayout.addLayout(fpsRow)
+        videoControlLayout.addLayout(qualityRow)
+        videoControlLayout.addLayout(disparitiesRow)
+        videoControlLayout.addLayout(blockRow)
+        videoControlLayout.addLayout(renderRow)
         viewerLayout.addWidget(videoControlCard)
         self.__tabs.addTab(viewerTab, "Viewer")
 
@@ -513,6 +672,7 @@ class VideoStreamingWindow(QWidget):
         self.__stereoMonoButtons[self.__stereoMonoMode].setChecked(True)
         stereoMonoRow.addStretch()
         stereoMonoCardLayout.addLayout(stereoMonoRow)
+
         controlsLayout.addWidget(stereoMonoCard)
         self.__stereoMonoCard = stereoMonoCard
         self.__stereoMonoCard.setVisible(False)
@@ -1271,6 +1431,7 @@ class VideoStreamingWindow(QWidget):
         
         # Icon playig flag
         self.__isPlaying = False
+        self.__isRecording = False
         self.__uploadProgress = None
 
         # FPS tracking
@@ -1288,6 +1449,9 @@ class VideoStreamingWindow(QWidget):
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
         self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
         self.__saveSnapshotBtn.clicked.connect(self.__saveVideoOnDevice)
+        self.__recordBtn.clicked.connect(self.__toggleRecording)
+        self.__recordBrowseBtn.clicked.connect(self.__selectRecordPath)
+        self.__recordPathEdit.editingFinished.connect(self.__storeRecordPathFromEdit)
         self.__fileLineEdit.textChanged.connect(self.__updateActiveFileLabel)
         self.__calibSaveBtn.clicked.connect(self.__saveCalibrationProfile)
         self.__calibLoadBtn.clicked.connect(self.__loadCalibrationProfile)
@@ -1303,6 +1467,10 @@ class VideoStreamingWindow(QWidget):
         self.__calibProfileCombo.currentTextChanged.connect(self.__syncCalibrationProfileName)
         self.__qualitySlider.valueChanged.connect(self.__updateQualityLabel)
         self.__qualitySlider.sliderReleased.connect(self.__emitQualityChanged)
+        self.__disparitiesSlider.valueChanged.connect(self.__updateDisparitiesLabel)
+        self.__disparitiesSlider.sliderReleased.connect(self.__emitDisparitiesChanged)
+        self.__blockSlider.valueChanged.connect(self.__updateBlockLabel)
+        self.__blockSlider.sliderReleased.connect(self.__emitBlockChanged)
         
         # Default stream mode
         self.__setStreamMode(self.__streamMode, emit_signal=False)
@@ -1332,6 +1500,41 @@ class VideoStreamingWindow(QWidget):
 
     def __emitQualityChanged(self) -> None:
         self.qualityChanged.emit(int(self.__qualitySlider.value()))
+
+    def __updateDisparitiesLabel(self, value: int) -> None:
+        step = 8
+        snapped = (value // step) * step
+        if snapped < self.__disparitiesSlider.minimum():
+            snapped = self.__disparitiesSlider.minimum()
+        if snapped != value:
+            self.__disparitiesSlider.blockSignals(True)
+            self.__disparitiesSlider.setValue(snapped)
+            self.__disparitiesSlider.blockSignals(False)
+        self.__disparitiesValueLabel.setText(str(snapped))
+
+    def __emitDisparitiesChanged(self) -> None:
+        value = int(self.__disparitiesSlider.value())
+        step = 8
+        snapped = (value // step) * step
+        if snapped < self.__disparitiesSlider.minimum():
+            snapped = self.__disparitiesSlider.minimum()
+        self.numDisparitiesChanged.emit(snapped)
+
+    def __updateBlockLabel(self, value: int) -> None:
+        odd_value = value if value % 2 == 1 else value - 1
+        if odd_value < self.__blockSlider.minimum():
+            odd_value = self.__blockSlider.minimum()
+        if odd_value != value:
+            self.__blockSlider.blockSignals(True)
+            self.__blockSlider.setValue(odd_value)
+            self.__blockSlider.blockSignals(False)
+        self.__blockValueLabel.setText(str(odd_value))
+
+    def __emitBlockChanged(self) -> None:
+        value = int(self.__blockSlider.value())
+        if value % 2 == 0:
+            value -= 1
+        self.blockSizeChanged.emit(max(self.__blockSlider.minimum(), value))
 
     def __syncFpsCombos(self, value: str) -> None:
         if not hasattr(self, "_VideoStreamingWindow__fpsCombo") or not hasattr(self, "_VideoStreamingWindow__fpsSel"):
@@ -1786,6 +1989,44 @@ class VideoStreamingWindow(QWidget):
         videoName : str = os.path.basename(self.__fileLineEdit.text())
         logging.info(f"Saving video on device: {videoName}")
         self.saveVideoOnDevice.emit(videoName)
+
+    def __selectRecordPath(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select Recording Folder")
+        if not path:
+            return
+        self.__recordPathEdit.setText(path)
+        self.__storeRecordPath(path)
+
+
+    def __storeRecordPathFromEdit(self) -> None:
+        self.__storeRecordPath(self.__recordPathEdit.text().strip())
+
+
+    def __storeRecordPath(self, path: str) -> None:
+        if not path:
+            return
+        self.__recordPath = path
+        self.__settings.setValue("recordPath", path)
+
+
+    def __toggleRecording(self) -> None:
+        if not self.__isRecording:
+            path = self.__recordPathEdit.text().strip()
+            if not path:
+                self.__selectRecordPath()
+                path = self.__recordPathEdit.text().strip()
+            if not path:
+                logging.info("Recording path not set; recording cancelled")
+                return
+            self.__storeRecordPath(path)
+            self.__recordBtn.setText("REC ON")
+            self.__recordBtn.setToolTip("Stop recording")
+            self.__isRecording = True
+        else:
+            self.__recordBtn.setText("REC")
+            self.__recordBtn.setToolTip("Start recording to disk")
+            self.__isRecording = False
+        self.recordingStateChanged.emit(self.__isRecording, self.__recordPath)
     
 
     def __startStreamOut(self) -> None:
@@ -1910,6 +2151,12 @@ class VideoStreamingWindow(QWidget):
         quality = params.get("quality")
         if isinstance(quality, int):
             self.__qualitySlider.setValue(quality)
+        num_disparities = params.get("num_disparities", params.get("disparities"))
+        if isinstance(num_disparities, int) and hasattr(self, "_VideoStreamingWindow__disparitiesSlider"):
+            self.__disparitiesSlider.setValue(num_disparities)
+        block_size = params.get("block_size", params.get("blocks"))
+        if isinstance(block_size, int) and hasattr(self, "_VideoStreamingWindow__blockSlider"):
+            self.__blockSlider.setValue(block_size)
         fps = params.get("fps")
         if isinstance(fps, int):
             self.updateFpsDisplay(str(fps))
@@ -1919,6 +2166,9 @@ class VideoStreamingWindow(QWidget):
         stereo_mono_mode = params.get("stereo_mono_mode")
         if isinstance(stereo_mono_mode, str):
             self.__setStereoMonoMode(stereo_mono_mode)
+        render_mode = params.get("disparity_render_mode")
+        if isinstance(render_mode, str) and render_mode in ("depth", "disparity"):
+            self.__setDisparityRenderMode(render_mode, emit_signal=False)
 
 
     # ------------------------------------------------------------------
@@ -1991,6 +2241,13 @@ class VideoStreamingWindow(QWidget):
         self.updateFrame(stacked)
 
 
+    def updateDisparityFrame(self, frame: np.ndarray) -> None:
+        """Render disparity frame (already RGB)."""
+        if frame is None:
+            return
+        self.updateFrame(frame)
+
+
     def __setStreamMode(self, mode: str, emit_signal: bool = True) -> None:
         if mode not in self.__streamModeButtons:
             return
@@ -2014,6 +2271,16 @@ class VideoStreamingWindow(QWidget):
                 self.__toggleCalibrationMode(emit_signal=emit_signal)
         if emit_signal and mode == "training":
             self.simulationSourceSelected.emit()
+        self.__resizeControlsPopout()
+
+    def __setDisparityRenderMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode not in self.__disparityRenderButtons:
+            return
+        self.__disparityRenderMode = mode
+        for key, btn in self.__disparityRenderButtons.items():
+            btn.setChecked(key == mode)
+        if emit_signal:
+            self.disparityRenderModeChanged.emit(mode)
         self.__resizeControlsPopout()
 
 

@@ -43,17 +43,69 @@ def print_header(message):
 
 def print_success(message):
     """Print a success message"""
-    print(f"{Colors.OKGREEN}✓ {message}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}[+] {message}{Colors.ENDC}")
 
 
 def print_error(message):
     """Print an error message"""
-    print(f"{Colors.FAIL}✗ {message}{Colors.ENDC}")
+    print(f"{Colors.FAIL}[x] {message}{Colors.ENDC}")
 
 
 def print_info(message):
     """Print an info message"""
-    print(f"{Colors.OKCYAN}ℹ {message}{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}[i] {message}{Colors.ENDC}")
+
+
+def _python_has_dev(python_exe):
+    if sys.platform != "win32":
+        return True
+    test_script = (
+        "import sys, sysconfig, os;"
+        "include_dir = sysconfig.get_path('include');"
+        "base = sys.base_prefix or sys.prefix;"
+        "ver = f'python{sys.version_info.major}{sys.version_info.minor}';"
+        "lib_candidates = ["
+        "os.path.join(base, 'libs', ver + '.lib'),"
+        "os.path.join(base, 'libs', ver + '_d.lib')"
+        "];"
+        "ok = include_dir and os.path.exists(os.path.join(include_dir, 'Python.h')) and any(os.path.exists(p) for p in lib_candidates);"
+        "sys.exit(0 if ok else 1)"
+    )
+    try:
+        result = subprocess.run([python_exe, "-c", test_script], check=False)
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+def _list_py_launcher_executables():
+    if sys.platform != "win32":
+        return []
+    try:
+        result = subprocess.run(["py", "-0p"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    exes = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            exes.append(parts[1])
+    return exes
+
+
+def _iter_python_candidates():
+    candidates = [sys.executable]
+    candidates.extend(_list_py_launcher_executables())
+    seen = set()
+    for exe in candidates:
+        norm = exe.lower() if sys.platform == "win32" else exe
+        if norm in seen:
+            continue
+        seen.add(norm)
+        yield exe
 
 
 def find_cmake():
@@ -133,47 +185,51 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
     build_dir.mkdir(parents=True, exist_ok=True)
     
     # CMake configure command
-    cmd = [
+    base_cmd = [
         cmake_path,
         f"-S{source_dir}",
         f"-B{build_dir}",
         f"-DCMAKE_BUILD_TYPE={build_type}",
     ]
-    
-    # Add generator if specified
-    if generator:
-        cmd.extend(["-G", generator])
-    elif sys.platform == "win32":
-        # On Windows, try to use Visual Studio generator
-        cmd.extend(["-G", "Visual Studio 17 2022"])
-    
-    print_info(f"Running: {' '.join(cmd)}")
-    
-    try:
-        subprocess.run(cmd, check=True, cwd=source_dir)
-        print_success("CMake configuration successful!")
-        return True
-    except subprocess.CalledProcessError as e:
-        print_error(f"CMake configuration failed with exit code {e.returncode}")
-        
-        # Try without specifying generator
-        if generator or sys.platform == "win32":
-            print_info("Retrying without generator specification...")
-            cmd_retry = [
-                cmake_path,
-                f"-S{source_dir}",
-                f"-B{build_dir}",
-                f"-DCMAKE_BUILD_TYPE={build_type}",
-            ]
+    python_candidates = list(_iter_python_candidates())
+    python_candidates.append(None)
+
+    def attempt_configure(use_generator):
+        for python_exe in python_candidates:
+            cmd = list(base_cmd)
+            if python_exe:
+                cmd.extend([
+                    f"-DPython_EXECUTABLE={python_exe}",
+                    f"-DPython3_EXECUTABLE={python_exe}",
+                ])
+                print_info(f"Using Python for CMake: {python_exe}")
+
+            if use_generator:
+                if generator:
+                    cmd.extend(["-G", generator])
+                elif sys.platform == "win32":
+                    cmd.extend(["-G", "Visual Studio 17 2022"])
+
+            print_info(f"Running: {' '.join(cmd)}")
             try:
-                subprocess.run(cmd_retry, check=True, cwd=source_dir)
-                print_success("CMake configuration successful (default generator)!")
+                subprocess.run(cmd, check=True, cwd=source_dir)
                 return True
             except subprocess.CalledProcessError:
-                pass
-        
-        print_error("Unable to configure CMake project")
+                continue
         return False
+
+    if attempt_configure(use_generator=True):
+        print_success("CMake configuration successful!")
+        return True
+
+    if generator or sys.platform == "win32":
+        print_info("Retrying without generator specification...")
+        if attempt_configure(use_generator=False):
+            print_success("CMake configuration successful (default generator)!")
+            return True
+
+    print_error("Unable to configure CMake project")
+    return False
 
 
 def build_project(cmake_path, build_dir, build_type="Release", target=None):
@@ -231,20 +287,40 @@ def run_tests(build_dir, build_type="Release"):
         return False
 
 
-def verify_python_module(python_modules_dir):
+def _read_cmake_python_executable(build_dir):
+    cache_path = build_dir / "CMakeCache.txt"
+    if not cache_path.exists():
+        return None
+    try:
+        cache_text = cache_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    for line in cache_text.splitlines():
+        if line.startswith("Python_EXECUTABLE:FILEPATH="):
+            return line.split("=", 1)[1]
+        if line.startswith("Python3_EXECUTABLE:FILEPATH="):
+            return line.split("=", 1)[1]
+    return None
+
+
+def verify_python_module(python_modules_dir, build_dir, build_type=None):
     """Verify the Python module was built"""
     print_header("Verifying Python Module")
     
     # Look for the module
     module_patterns = [f"{MODULE_NAME}*.pyd", f"{MODULE_NAME}*.so", f"{MODULE_NAME}*.dll"]
+    search_dirs = [python_modules_dir]
+    if build_type:
+        search_dirs.append(python_modules_dir / build_type)
     found_modules = []
     
-    for pattern in module_patterns:
-        found_modules.extend(python_modules_dir.glob(pattern))
+    for search_dir in search_dirs:
+        for pattern in module_patterns:
+            found_modules.extend(search_dir.glob(pattern))
     
     if not found_modules:
         print_error("Python module not found!")
-        print_info(f"Expected to find module in {python_modules_dir}")
+        print_info(f"Expected to find module in: {', '.join(str(d) for d in search_dirs)}")
         return False
     
     for module in found_modules:
@@ -252,18 +328,44 @@ def verify_python_module(python_modules_dir):
     
     # Try to import the module
     print_info("Testing Python module import...")
-    sys.path.insert(0, str(python_modules_dir))
-    
+    module_dir = found_modules[0].parent
+    python_exe = _read_cmake_python_executable(build_dir)
+    if python_exe:
+        python_path = Path(python_exe)
+    else:
+        python_path = None
+
+    if python_path and python_path.exists() and python_path.resolve() != Path(sys.executable).resolve():
+        print_info(f"Testing Python module import with: {python_path}")
+        test_script = (
+            "import sys; "
+            f"sys.path.insert(0, r'{module_dir}'); "
+            f"import {MODULE_NAME} as m; "
+            "print(f'Imported rc_car_cpp (version {m.__version__})'); "
+            "mag = m.MathOperations.vector_magnitude(3.0, 4.0, 0.0); "
+            "print(f'vector_magnitude(3, 4, 0) = {mag}'); "
+            "assert abs(mag - 5.0) < 0.0001"
+        )
+        result = subprocess.run([str(python_path), "-c", test_script], capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error(f"Failed to import module: {result.stderr.strip() or result.stdout.strip()}")
+            return False
+        for line in result.stdout.splitlines():
+            print_info(line)
+        print_success("Python module is working correctly!")
+        return True
+
+    sys.path.insert(0, str(module_dir))
     try:
         module = __import__(MODULE_NAME)
         print_success(f"Successfully imported {MODULE_NAME} module (version {module.__version__})")
-        
+
         # Test basic functionality
         mag = module.MathOperations.vector_magnitude(3.0, 4.0, 0.0)
         print_info(f"Test: vector_magnitude(3, 4, 0) = {mag}")
         assert abs(mag - 5.0) < 0.0001, "Vector magnitude test failed!"
         print_success("Python module is working correctly!")
-        
+
         return True
     except ImportError as e:
         print_error(f"Failed to import module: {e}")
@@ -336,7 +438,7 @@ Examples:
         if not build_project(cmake_path, build_dir, build_type):
             return 1
         
-        if not verify_python_module(python_modules_dir):
+        if not verify_python_module(python_modules_dir, build_dir, build_type):
             return 1
         
         print_header("Build Complete!")

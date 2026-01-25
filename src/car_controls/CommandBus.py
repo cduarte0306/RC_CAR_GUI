@@ -58,6 +58,8 @@ class CamCommands(Enum):
     CmdSelCameraStream      = auto()
     CmdSetFps               = auto()
     CmdSetQuality           = auto()
+    CmdSetNumDisparities    = auto()
+    CmdSetBlockSize         = auto()
     CmdRdParams             = auto()
     CmdClrVideoRec          = auto()
     CmdSaveVideo            = auto()

@@ -27,6 +27,8 @@ class BackendIface(QThread):
     videoBufferSignal           = pyqtSignal(object, object) # Frame received signal (left and right frames)
     videoBufferSignalStereo     = pyqtSignal(object, object) # Stereo frame received signal (left and right frames)
     videoBufferSignalStereoMono = pyqtSignal(object, object) # Stereo mono frame received signal (left frame and right frame as int)
+    videoBufferSignalDisparity  = pyqtSignal(object, object) # Disparity frame received signal (left frame and right frame as int)
+
     deviceDiscovered            = pyqtSignal(str)            # Device discovered signal (emits IP)
     deviceConnected             = pyqtSignal(str)            # Device connected (emits IP)
     deviceMacResolved           = pyqtSignal(str, str)       # Emits (ip, mac)
@@ -264,7 +266,7 @@ class BackendIface(QThread):
         """
         self.__networkManager.startDiscovery()
         
-        
+
     def __startingVideoTransmission(self) -> None:
         """
         Video transmission starting
@@ -294,7 +296,7 @@ class BackendIface(QThread):
     
     def __handleParamsReply(self, reply : Reply):
         """
-        Handles replies from the load calibration parameters command
+        Handles replies from the load streaming parameters command
         Args:
             reply (Reply): Reply from host
         """
@@ -314,7 +316,7 @@ class BackendIface(QThread):
             logging.error("Failed to parse calibration parameters payload: %s", exc)
             return
 
-        logging.info("Loaded calibration parameters: %s", params)
+        logging.info("Loaded streaming parameters: %s", params)
         # Here you would typically emit a signal or store the params for UI consumption
         self.paramsLoaded.emit(params)
         
@@ -402,7 +404,7 @@ class BackendIface(QThread):
         # Here you would implement the actual upload logic
         # For now, just log the action
         
-        
+
     @pyqtSlot(bool)
     def setCameraSource(self, calMode:bool) -> None:
         """Set the camera source to either simulation or physical camera."""
@@ -424,7 +426,7 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
-    
+
 
     @pyqtSlot()
     def setSimulationSource(self) -> None:
@@ -535,6 +537,19 @@ class BackendIface(QThread):
             logging.error("Failed to enqueue save video command: %s", exc)
 
 
+    def setRecordingState(self, enabled: bool, path: str) -> None:
+        """Set local recording state and path for incoming video frames."""
+        if path:
+            logging.info("Setting recording path to: %s", path)
+            self.__videoStreamer.setRecordingPath(path)
+        logging.info("Recording %s", "enabled" if enabled else "disabled")
+        self.__videoStreamer.setRecordingState(enabled)
+
+
+    def setDisparityRenderMode(self, mode: str) -> None:
+        """Control how disparity frames are visualized on the host."""
+        self.__videoStreamer.setDisparityRenderMode(mode)
+
 
     def setStereoMonoMode(self, mode: str) -> None:
         """Set stereo-mono render mode (normal/disparity) on the camera."""
@@ -637,6 +652,42 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
+
+
+    def setNumDisparities(self, value: int) -> None:
+        """Set the number of disparities on the camera (must be multiple of 8)."""
+        step = 8
+        value = (value // step) * step
+        if value <= 0:
+            return
+        logging.info("Setting num disparities to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetNumDisparities.value
+        cam_cmd.data.u16 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue num disparities command: %s", exc)
+
+
+    def setBlockSize(self, value: int) -> None:
+        """Set the block size on the camera (must be odd, typically >= 5)."""
+        if value % 2 == 0:
+            value -= 1
+        if value < 5:
+            value = 5
+        if value <= 0:
+            return
+        logging.info("Setting block size to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetBlockSize.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue block size command: %s", exc)
     
     
     def __loadStoredVideoList(self) -> None:

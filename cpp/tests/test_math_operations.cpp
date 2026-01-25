@@ -6,6 +6,8 @@
 
 using namespace rc_car;
 
+constexpr double kPi = 3.14159265358979323846;
+
 void testVectorMagnitude() {
     std::cout << "Testing vector magnitude..." << std::endl;
     
@@ -26,8 +28,8 @@ void testAngleBetweenVectors() {
     // Perpendicular vectors (90 degrees = pi/2 radians)
     double angle1 = MathOperations::angleBetweenVectors(1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
     std::cout << "  Angle between (1,0,0) and (0,1,0): " << angle1 
-              << " radians (expected " << M_PI/2 << ")" << std::endl;
-    assert(std::abs(angle1 - M_PI/2) < 0.0001);
+              << " radians (expected " << kPi / 2.0 << ")" << std::endl;
+    assert(std::abs(angle1 - kPi / 2.0) < 0.0001);
     
     // Parallel vectors (0 degrees)
     double angle2 = MathOperations::angleBetweenVectors(1.0, 0.0, 0.0, 2.0, 0.0, 0.0);
@@ -38,8 +40,8 @@ void testAngleBetweenVectors() {
     // Opposite vectors (180 degrees = pi radians)
     double angle3 = MathOperations::angleBetweenVectors(1.0, 0.0, 0.0, -1.0, 0.0, 0.0);
     std::cout << "  Angle between (1,0,0) and (-1,0,0): " << angle3 
-              << " radians (expected " << M_PI << ")" << std::endl;
-    assert(std::abs(angle3 - M_PI) < 0.0001);
+              << " radians (expected " << kPi << ")" << std::endl;
+    assert(std::abs(angle3 - kPi) < 0.0001);
     
     std::cout << "  ✓ Angle between vectors tests passed!" << std::endl;
 }

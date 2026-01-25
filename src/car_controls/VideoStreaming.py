@@ -32,7 +32,7 @@ class FrameMetadata(ctypes.Structure):
 class FragmentHeader(ctypes.Structure):
     _pack_ = 1
     _fields_ = [
-        ("frameType",   ctypes.c_uint8),  # 0: Mono, 1: Stereo, 2: Stereo-mono
+        ("frameType",   ctypes.c_uint8),  # 0: Mono, 1: Stereo, 2: Disparity
         ("frameSide",   ctypes.c_uint8),  # 0: Left, 1: Right (for stereo)
     ]
 
@@ -54,19 +54,24 @@ class FrameHeader(ctypes.Structure):
         ("frameHeader", FragmentHeader),
         ("metadata",    FrameMetadata),
     ]
+    
 
+"""
+int16_t gx;  // Gyro X-axis
+int16_t gy;  // Gyro Y-axis
+int16_t gz;  // Gyro Z-axis
+int16_t ax;  // Accel X-axis
+int16_t ay;  // Accel Y-axis
+int16_t az;  // Accel Z-axis
+int rows;    // Number of rowss on frame
+int cols;    // Number of columns on frame
+uint8_t  type;                // OpenCV type enum (e.g. CV_16S = 3)
+uint8_t  channels;            // normally 1 for disparity
+uint16_t elemSize;            // Element sizes
+double Q[QSize];  // Reprojection matrixs
+"""
 
-class StereoFrameMonoHeader(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [
-        ("xPos",   ctypes.c_int16),
-        ("yPos",   ctypes.c_int16),
-        ("width",  ctypes.c_uint16),
-        ("frame",  ctypes.c_char_p)
-    ]
-
-
-class GyroData(ctypes.Structure):
+class StereoData(ctypes.Structure):
     _pack_ = 1
     _fields_ = [
         ("gyroX", ctypes.c_int16),
@@ -75,6 +80,12 @@ class GyroData(ctypes.Structure):
         ("accelX", ctypes.c_int16),
         ("accelY", ctypes.c_int16),
         ("accelZ", ctypes.c_int16),
+        ("rows", ctypes.c_int),
+        ("cols", ctypes.c_int),
+        ("type", ctypes.c_uint8),
+        ("channels", ctypes.c_uint8),    # Number of channels
+        ("elemSize", ctypes.c_uint16),   # Frame element sizess
+        ("rows", ctypes.c_double * 16),  # Rectification matrix values
     ]
 
 
@@ -97,6 +108,13 @@ class VideoStreamer:
         DecodingOK = 0
         DecodingIncomplete = auto()
         DecodingError = auto()
+        
+    class FrameTypes (Enum):
+        Mono = 0
+        Stereo = 1
+        Disparity = 2
+
+    _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
     def __init__(self, streamInAdapter: UDP = None, streamOutAdapter: UDP = None, path: str = ""):
         self.__cap = None
@@ -118,6 +136,8 @@ class VideoStreamer:
         self.__receivedFrameBuff = bytearray()
         self.__lastRecvFrameTime: float | None = None
         self.__lastFpsTime: float | None = None
+        self.__disparityRenderMode: str = "depth"
+        self.__disparityDebugLast: float = 0.0
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
         self.__sendThread = None  # Create on demand
@@ -126,9 +146,16 @@ class VideoStreamer:
         self.__frameBufferMono = CircularBuffer(100)
         self.__frameBufferStereo = CircularBuffer(100)
         self.__frameBufferStereoMono = CircularBuffer(100)
+        self.__frameBufferDisparity = CircularBuffer(100)
         self.__streamInBuff = CircularBuffer(200)
         self.__streamOutBuff = CircularBuffer(100)
-
+        self.__recordPath: str = ""
+        self.__isRecording: bool = False
+        self.__recordWriter = None
+        self.__recordFilename: str = ""
+        self.__recordSize: tuple[int, int] | None = None
+        self.__recordFps: float = 30.0
+        self.__recordFourcc = cv2.VideoWriter_fourcc(*"mp4v")
         # Signals
         self.sendFrameSignal = Signal()  # Emitted when a frame is ready to be sent out
 
@@ -143,17 +170,197 @@ class VideoStreamer:
 
         self.__receiveThread.start()
 
+
     def setVideoSource(self, filePath: str) -> None:
         videoName = os.path.basename(filePath)
         if len(videoName) > 128:
             raise ValueError("Source file name exceeds maximum length of 128 characters")
         self.__srcFile = filePath
 
+
     def startStream(self, ip: str) -> bool:
         return True
 
+
     def setFrame(self, data: bytes) -> None:
         self.__streamInBuff.push(data)
+        
+    
+    def setRecordingPath(self, path: str) -> None:
+        """
+        Set the path where recorded videos will be saved.
+
+        Args:
+            path (str): The directory path for saving recorded videos.
+        """
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(path, f"recording_{timestamp}")
+        self.__recordPath = path
+        
+    
+    def setRecordingState(self, isRecording: bool) -> None:
+        """
+        Enable or disable recording of incoming video frames.
+
+        Args:
+            isRecording (bool): True to enable recording, False to disable.
+        """
+        if self.__isRecording and not isRecording:
+            self.__close_record_writer()
+        if not self.__isRecording and isRecording:
+            self.__close_record_writer()
+        self.__isRecording = isRecording
+
+
+    def setDisparityRenderMode(self, mode: str) -> None:
+        """Set how disparity frames should be visualized ("depth" or "disparity")."""
+        if mode not in ("depth", "disparity"):
+            logging.warning("Unknown disparity render mode: %s", mode)
+            return
+        self.__disparityRenderMode = mode
+        
+        
+    def __process_disparity_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Process a disparity frame for visualization based on the selected render mode.
+
+        Args:
+            frame (np.ndarray): Input disparity frame.
+
+        Returns:
+            np.ndarray: Processed frame for visualization.
+        """
+        if frame is None:
+            return frame
+
+        disp = frame
+        if disp.ndim == 3:
+            if disp.shape[2] == 4:
+                disp = cv2.cvtColor(disp, cv2.COLOR_BGRA2GRAY)
+            else:
+                disp = cv2.cvtColor(disp, cv2.COLOR_BGR2GRAY)
+        if disp.ndim != 2:
+            return frame
+
+        disp32f = np.maximum(disp.astype(np.float32), 0.0)
+        disp8U = np.zeros_like(disp32f, dtype=np.uint8)
+        valid_mask = (disp32f > 0.0).astype(np.uint8)
+        if valid_mask.ndim != 2:
+            valid_mask = valid_mask[:, :, 0]
+        if valid_mask.dtype != np.uint8:
+            valid_mask = valid_mask.astype(np.uint8)
+        valid_count = cv2.countNonZero(valid_mask)
+        if valid_count > 0:
+            valid_vals = disp32f[valid_mask > 0]
+            if valid_vals.size > 0:
+                vmin = float(np.percentile(valid_vals, 5))
+                vmax = float(np.percentile(valid_vals, 95))
+            else:
+                vmin, vmax, _, _ = cv2.minMaxLoc(disp32f, mask=valid_mask)
+            if vmax > vmin:
+                scale = 255.0 / (vmax - vmin)
+                shift = -vmin * scale
+                scaled = cv2.convertScaleAbs(disp32f, alpha=scale, beta=shift)
+                np.copyto(disp8U, scaled, where=(valid_mask > 0))
+        else:
+            vmin, vmax = 0.0, 0.0
+
+        now = time.time()
+        if now - self.__disparityDebugLast >= 2.0:
+            total = valid_mask.size
+            ratio = (valid_count / total) if total else 0.0
+            logging.info(
+                "Disparity debug: mode=%s valid=%.2f%% min=%.2f max=%.2f",
+                self.__disparityRenderMode,
+                ratio * 100.0,
+                vmin,
+                vmax,
+            )
+            self.__disparityDebugLast = now
+
+        if self.__disparityRenderMode == "depth":
+            colored = cv2.applyColorMap(disp8U, cv2.COLORMAP_JET)
+            return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+
+        return cv2.cvtColor(disp8U, cv2.COLOR_GRAY2RGB)
+
+
+    def __close_record_writer(self) -> None:
+        if self.__recordWriter is not None:
+            self.__recordWriter.release()
+        self.__recordWriter = None
+        self.__recordFilename = ""
+        self.__recordSize = None
+
+
+    def __record_fps(self) -> float:
+        if hasattr(self, "_VideoStreamer__fpsDelta") and self.__fpsDelta:
+            if self.__fpsDelta > 0:
+                fps_val = 1.0 / self.__fpsDelta
+                return max(1.0, min(120.0, fps_val))
+        return self.__recordFps
+
+
+    def __ensure_record_writer(self, size: tuple[int, int], tag: str) -> bool:
+        if not (self.__isRecording and self.__recordPath):
+            return False
+        if self.__recordWriter is not None and self.__recordSize == size:
+            return True
+        self.__close_record_writer()
+        try:
+            os.makedirs(self.__recordPath, exist_ok=True)
+        except OSError:
+            logging.error("Failed to create record path: %s", self.__recordPath)
+            return False
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{tag}_{timestamp}.mp4"
+        filepath = os.path.join(self.__recordPath, filename)
+        writer = cv2.VideoWriter(filepath, self.__recordFourcc, self.__record_fps(), size)
+        if not writer.isOpened():
+            logging.error("Failed to open video writer for: %s", filepath)
+            return False
+        self.__recordWriter = writer
+        self.__recordFilename = filepath
+        self.__recordSize = size
+        return True
+
+
+    def __normalize_record_frame(self, frame_bgr: np.ndarray) -> np.ndarray | None:
+        if frame_bgr is None:
+            return None
+        frame = frame_bgr
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        elif frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        frame = np.ascontiguousarray(frame)
+        height, width = frame.shape[:2]
+        if width % 2 != 0 or height % 2 != 0:
+            new_w = width - (width % 2)
+            new_h = height - (height % 2)
+            if new_w <= 0 or new_h <= 0:
+                return None
+            frame = cv2.resize(frame, (new_w, new_h))
+        return frame
+
+
+    def __record_frame(self, frame_bgr: np.ndarray, tag: str) -> None:
+        frame = self.__normalize_record_frame(frame_bgr)
+        if frame is None:
+            return
+        size = (frame.shape[1], frame.shape[0])
+        if not self.__ensure_record_writer(size, tag):
+            return
+        try:
+            self.__recordWriter.write(frame)
+        except cv2.error as exc:
+            logging.error("VideoWriter write failed: %s", exc)
+            self.__close_record_writer()
+
+
+
 
     def startStreamOut(self, state: bool) -> None:
         logging.info("Setting stream out to: %s", "ON" if state else "OFF")
@@ -164,25 +371,36 @@ class VideoStreamer:
             self.__sendThread = Thread(target=self.__streamOutThread, daemon=True)
             self.__sendThread.start()
 
+
     def getFrameOut(self) -> None | np.ndarray:
         if self.__streamOutBuff.empty():
             return None
         return self.__streamOutBuff.read()
+
 
     def getFrameIn(self) -> None | np.ndarray:
         if not self.__frameBufferMono.empty():
             return self.__frameBufferMono.read()
         return None
 
+
     def getFrameBufferInStereo(self) -> None | np.ndarray:
         if not self.__frameBufferStereo.empty():
             return self.__frameBufferStereo.read()
         return None
 
+
     def getFrameBufferInStereoMono(self) -> None | tuple[np.ndarray, int, int, int]:
         if not self.__frameBufferStereoMono.empty():
             return self.__frameBufferStereoMono.read()
         return None
+    
+    
+    def getFrameBufferInDisparity(self) -> None | tuple[np.ndarray, int, int, int]:
+        if not self.__frameBufferDisparity.empty():
+            return self.__frameBufferDisparity.read()
+        return None
+
 
     def __sendFrame(self, data: bytes, frameType: int = 0, frameSide: int = 0, videoName: str = "") -> None:
         frameMeta = FrameMetadata()
@@ -271,6 +489,7 @@ class VideoStreamer:
         cap.release()
         del cap
 
+
     def __streamThread(self) -> None:
         ret : VideoStreamer.Decodestatus
         frameOkCounter = 0
@@ -296,12 +515,12 @@ class VideoStreamer:
             frameHdr = FrameHeader.from_buffer_copy(data[:header_size])
             frameType = frameHdr.frameHeader.frameType
             frameSide = frameHdr.frameHeader.frameSide
-
-            if frameType == 0:
+            
+            if frameType == VideoStreamer.FrameTypes.Mono.value:
                 ret = self.assembleMonoFrame(data, frameHdr)
-            elif frameType == 1:
+            elif frameType == VideoStreamer.FrameTypes.Stereo.value:
                 ret = self.assembleStereoFrame(data, frameHdr, frameSide)
-            elif frameType == 2:
+            elif frameType == VideoStreamer.FrameTypes.Disparity.value:
                 ret = self.assembleStereoMonoFrame(data, frameHdr)
 
             if ret == VideoStreamer.Decodestatus.DecodingOK:
@@ -315,17 +534,6 @@ class VideoStreamer:
             if frameErrCounter == 0:
                 continue
 
-            # errRatio : float = (frameOkCounter / frameErrCounter)
-            # if errRatio < 50 and receivedFrames >= 100:
-            #     frameOkCounter = 0
-            #     frameErrCounter = 0
-            #     receivedFrames = 0
-                
-            #     # Lower quality to try to reduce bandwidth
-            #     qualitySetting -= 10
-                
-            #     self.requestVideoSettings.emit(qualitySetting, fpsSetting)  # Lower quality, higher compression
-            
             logging.debug(f"Frame OK: {frameOkCounter}, Frame Errors: {frameErrCounter}")
 
 
@@ -341,6 +549,7 @@ class VideoStreamer:
                 fps_text = f"FPS: {fps_val:.1f}"
         self.__lastRecvFrameTime = now
         return fps_text
+
 
     def assembleMonoFrame(self, data: bytes, header: FrameHeader) -> "VideoStreamer.Decodestatus":
         header_size = ctypes.sizeof(FrameHeader)
@@ -397,6 +606,8 @@ class VideoStreamer:
 
             if frame is None:
                 return VideoStreamer.Decodestatus.DecodingError
+            if self.__isRecording and self.__recordPath:
+                self.__record_frame(frame, "mono")
             rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.__frameBufferMono.push(rgbImage)
             return (VideoStreamer.Decodestatus.DecodingError
@@ -535,6 +746,8 @@ class VideoStreamer:
         self.__expectedSegmentsStereoL = 0
         self.__expectedSegmentsStereoR = 0
 
+        if self.__isRecording and self.__recordPath:
+            self.__record_frame(stitched, "stereo")
         rgbImage = cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB)
         self.__frameBufferStereo.push(rgbImage)
         return (VideoStreamer.Decodestatus.DecodingError
@@ -583,10 +796,9 @@ class VideoStreamer:
                     self.__recvFrameIDStereoMono = None
                     return VideoStreamer.Decodestatus.DecodingError
                 imgBytes.extend(self.__segmentMapStereoMono[i])
-
-            gyro_data = GyroData.from_buffer_copy(imgBytes)
-            imgBytes_ = imgBytes[ctypes.sizeof(GyroData):]
-            img = cv2.imdecode(np.frombuffer(imgBytes_, dtype=np.uint8), cv2.IMREAD_COLOR)
+            gyro_data = StereoData.from_buffer_copy(imgBytes)
+            imgBytes_ = imgBytes[ctypes.sizeof(StereoData):]
+            img = cv2.imdecode(np.frombuffer(imgBytes_, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
 
             if img is None:
                 logging.warning("Failed to decode stereo-mono image for frame %s", self.__recvFrameIDStereoMono)
@@ -601,7 +813,18 @@ class VideoStreamer:
             self.__segmentMapStereoMono.clear()
             self.__recvFrameIDStereoMono = None
 
+            if self.__isRecording and self.__recordPath:
+                overlay_img = img.copy()
+                gyro_text = f"GyroX: {gyro_data.gyroX}, GyroY: {gyro_data.gyroY}, GyroZ: {gyro_data.gyroZ}"
+                cv2.putText(overlay_img, gyro_text, (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                self.__record_frame(overlay_img, "stereo_mono")
+
+            # rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # rgbImage = self.__process_disparity_frame(img)
+            # rgbImage = img
+            print(img.dtype, img.shape)
+
             self.__frameBufferStereoMono.push((rgbImage, (gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ)))
             return (VideoStreamer.Decodestatus.DecodingError
                     if out_of_order
@@ -610,3 +833,20 @@ class VideoStreamer:
                 if out_of_order
                 else VideoStreamer.Decodestatus.DecodingIncomplete)
 
+
+    def __decodePointCloudFrame(self, segmentMap : dict, frameId: int) -> bool:
+        """Decode a point cloud frame from received data."""
+        imgBytes = bytearray()
+        for i in range(self.__expectedSegmentsStereoMono):
+            if i not in segmentMap:
+                logging.warning(f"Missing segment {i} for stereo frame {self.__recvFrameIDStereoMono}")
+                segmentMap.clear()
+                self.__recvFrameIDStereoMono = None
+                return VideoStreamer.Decodestatus.DecodingError
+            imgBytes.extend(segmentMap[i])
+        stereoDatas = StereoData.from_buffer_copy(imgBytes)
+        imgBytes_ = imgBytes[ctypes.sizeof(StereoData):]
+        
+        # Reconstruct the frame
+        print(f"Resolution: {stereoDatas.cols}x{stereoDatas.rows}", )
+        

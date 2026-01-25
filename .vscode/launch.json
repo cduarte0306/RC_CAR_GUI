@@ -12,6 +12,16 @@
             "cwd": "${workspaceFolder}/src",
             "justMyCode": false,
             "subProcess": true
+        },
+        {
+            "name": "Debug C++ App (rc_car_app)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/rc_car_app.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "Build C++ App (Debug)",
+            "console": "integratedTerminal"
         }
     ]
 }

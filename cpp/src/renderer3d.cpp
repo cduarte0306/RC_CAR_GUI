@@ -2,6 +2,9 @@
 #include <algorithm>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <GL/gl.h>
 #elif defined(__APPLE__)

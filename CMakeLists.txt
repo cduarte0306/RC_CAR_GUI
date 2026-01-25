@@ -21,6 +21,7 @@ else()
 endif()
 
 find_package(OpenGL REQUIRED)
+find_package(OpenCV QUIET)
 
 # Core C++ library (static library for standalone testing)
 add_library(rc_car_core STATIC
@@ -62,6 +63,18 @@ add_executable(test_cpp
 )
 
 target_link_libraries(test_cpp PRIVATE rc_car_core)
+
+# Standalone C++ app for direct debugging
+add_executable(rc_car_app
+    cpp/src/main.cpp
+)
+
+target_link_libraries(rc_car_app PRIVATE rc_car_core OpenGL::GL)
+if(OpenCV_FOUND)
+    target_link_libraries(rc_car_app PRIVATE ${OpenCV_LIBS})
+    target_include_directories(rc_car_app PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(rc_car_app PRIVATE RC_CAR_HAS_OPENCV=1)
+endif()
 
 # Installation rules
 install(TARGETS rc_car_cpp
