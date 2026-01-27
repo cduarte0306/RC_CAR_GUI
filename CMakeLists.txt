@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(rc_car_cpp VERSION 1.0.0 LANGUAGES CXX)
+project(rc_car_cpp VERSION 1.0.0 LANGUAGES CXX CUDA)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -20,8 +20,24 @@ else()
     FetchContent_MakeAvailable(pybind11)
 endif()
 
+# Pull and build open3d with CUDA support
+set(OPEN3D_SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/open3d)
+set(BUILD_CUDA_MODULES ON CACHE BOOL "Build Open3D with CUDA support" FORCE)
+
+if(EXISTS ${OPEN3D_SOURCE_DIR}/CMakeLists.txt)
+    add_subdirectory(${OPEN3D_SOURCE_DIR})
+else()
+    message(WARNING "Open3D submodule not found, fetching release archive")
+    FetchContent_Declare(
+        open3d
+        URL https://github.com/isl-org/Open3D/archive/refs/tags/v0.17.0.tar.gz
+    )
+    FetchContent_MakeAvailable(open3d)
+endif()
+
 find_package(OpenGL REQUIRED)
 find_package(OpenCV QUIET)
+find_package(CUDA REQUIRED)
 
 # Core C++ library (static library for standalone testing)
 add_library(rc_car_core STATIC

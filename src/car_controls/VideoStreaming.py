@@ -85,7 +85,7 @@ class StereoData(ctypes.Structure):
         ("type", ctypes.c_uint8),
         ("channels", ctypes.c_uint8),    # Number of channels
         ("elemSize", ctypes.c_uint16),   # Frame element sizess
-        ("rows", ctypes.c_double * 16),  # Rectification matrix values
+        ("Q", ctypes.c_double * 16),  # Rectification matrix values
     ]
 
 
@@ -138,6 +138,7 @@ class VideoStreamer:
         self.__lastFpsTime: float | None = None
         self.__disparityRenderMode: str = "depth"
         self.__disparityDebugLast: float = 0.0
+        self.__depthDebugLast: float = 0.0
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
         self.__sendThread = None  # Create on demand
@@ -787,6 +788,17 @@ class VideoStreamer:
             return VideoStreamer.Decodestatus.DecodingError
         self.__segmentMapStereoMono[segID] = bytes(data[payload_start:payload_end])
 
+        # we may now decode
+        if len(self.__segmentMapStereoMono) == self.__expectedSegmentsStereoMono:
+            decodeRet = self.__decodePointCloudFrame(self.__segmentMapStereoMono)
+            return (VideoStreamer.Decodestatus.DecodingError
+                    if not decodeRet
+                    else VideoStreamer.Decodestatus.DecodingOK)
+        return (VideoStreamer.Decodestatus.DecodingError
+            if out_of_order
+            else VideoStreamer.Decodestatus.DecodingIncomplete)
+        return 
+        
         if len(self.__segmentMapStereoMono) == self.__expectedSegmentsStereoMono:
             imgBytes = bytearray()
             for i in range(self.__expectedSegmentsStereoMono):
@@ -834,7 +846,7 @@ class VideoStreamer:
                 else VideoStreamer.Decodestatus.DecodingIncomplete)
 
 
-    def __decodePointCloudFrame(self, segmentMap : dict, frameId: int) -> bool:
+    def __decodePointCloudFrame(self, segmentMap : dict) -> bool:
         """Decode a point cloud frame from received data."""
         imgBytes = bytearray()
         for i in range(self.__expectedSegmentsStereoMono):
@@ -846,7 +858,129 @@ class VideoStreamer:
             imgBytes.extend(segmentMap[i])
         stereoDatas = StereoData.from_buffer_copy(imgBytes)
         imgBytes_ = imgBytes[ctypes.sizeof(StereoData):]
+        Matx44d = (ctypes.c_double * 4) * 4
         
         # Reconstruct the frame
-        print(f"Resolution: {stereoDatas.cols}x{stereoDatas.rows}", )
-        
+        q_mat = Matx44d()
+        for idx, val in enumerate(stereoDatas.Q):
+            q_mat[idx // 4][idx % 4] = val
+
+        dtype_map = {
+            0: np.uint8,   # CV_8U
+            1: np.int8,    # CV_8S
+            2: np.uint16,  # CV_16U
+            3: np.int16,   # CV_16S
+            4: np.int32,   # CV_32S
+            5: np.float32, # CV_32F
+            6: np.float64, # CV_64F
+        }
+        depth = stereoDatas.type & 7
+        dtype = dtype_map[depth]
+
+        channels = stereoDatas.channels  # or (stereoDatas.type >> 3) + 1
+        rows = stereoDatas.rows
+        cols = stereoDatas.cols
+
+        buf = np.frombuffer(imgBytes_, dtype=dtype)
+        if channels == 1:
+            frame = buf.reshape(rows, cols)
+        else:
+            frame = buf.reshape(rows, cols, channels)
+
+        # Normalize disparity for display and convert to RGB
+        if frame.ndim == 2:
+            disp = frame
+            if disp.dtype != np.uint8:
+                disp_norm = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX)
+                disp8 = disp_norm.astype(np.uint8, copy=False)
+            else:
+                disp8 = disp
+            rgbImage = cv2.cvtColor(disp8, cv2.COLOR_GRAY2RGB)
+        elif frame.ndim == 3 and frame.shape[2] == 4:
+            rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+            disp = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+        elif frame.ndim == 3 and frame.shape[2] == 3:
+            if frame.dtype != np.uint8:
+                rgbImage = np.clip(frame, 0, 255).astype(np.uint8)
+            else:
+                rgbImage = frame
+            disp = cv2.cvtColor(rgbImage, cv2.COLOR_RGB2GRAY)
+        else:
+            logging.warning("Unexpected disparity frame shape: %s", getattr(frame, "shape", None))
+            return False
+
+        # Convert to 3D (single-channel disparity only)
+        if disp.dtype not in (np.uint8, np.int16, np.int32, np.float32):
+            disp32f = disp.astype(np.float32)
+        else:
+            disp32f = disp.astype(np.float32, copy=False)
+        Q = np.array(q_mat, dtype=np.float32)
+        points3d = cv2.reprojectImageTo3D(disp32f, Q)  # HxWx3, float32
+        Z = points3d[:, :, 2]  # depth
+
+        # Full per-pixel distance (range) map: sqrt(X^2 + Y^2 + Z^2)
+        # Note: invalid disparity -> inf/nan points, handled via mask below.
+        dist = np.linalg.norm(points3d, axis=2)
+
+        now = time.time()
+        if now - self.__depthDebugLast >= 2.0:
+            finite_mask = np.isfinite(Z)
+            if np.any(finite_mask):
+                z_min_dbg = float(np.min(Z[finite_mask]))
+                z_max_dbg = float(np.max(Z[finite_mask]))
+            else:
+                z_min_dbg = float("nan")
+                z_max_dbg = float("nan")
+
+            finite_dist_mask = np.isfinite(dist)
+            if np.any(finite_dist_mask):
+                d_min_dbg = float(np.min(dist[finite_dist_mask]))
+                d_max_dbg = float(np.max(dist[finite_dist_mask]))
+            else:
+                d_min_dbg = float("nan")
+                d_max_dbg = float("nan")
+
+            q32 = Q.astype(np.float32, copy=False)
+            q32_3_2 = float(q32[3, 2]) if q32.shape == (4, 4) else float("nan")
+            baseline_est = (-1.0 / q32_3_2) if q32_3_2 not in (0.0, -0.0) else float("nan")
+
+            h, w = Z.shape[:2]
+            sample_points = {
+                "center": (h // 2, w // 2),
+                "tl": (0, 0),
+                "tr": (0, w - 1),
+                "bl": (h - 1, 0),
+                "br": (h - 1, w - 1),
+            }
+            sample_str = ", ".join(
+                f"{name}={float(Z[y, x]):.3f}" for name, (y, x) in sample_points.items()
+            )
+
+            print(
+                "Depth debug: disp=%s %s Zmin=%.3f Zmax=%.3f Dmin=%.3f Dmax=%.3f baseline≈%.3f Q[3,2]=%.6f | %s"
+                % (disp32f.dtype, disp32f.shape, z_min_dbg, z_max_dbg, d_min_dbg, d_max_dbg, baseline_est, q32_3_2, sample_str)
+            )
+            print(f"Q=\n{q32}")
+            self.__depthDebugLast = now
+
+        # Valid mask: disparity > 0 is a good first rule
+        mask = disp32f > 0
+
+        # Clamp depth range for visualization (meters)
+        z_min, z_max = 0.2, 20.0
+        Z_vis = Z.copy()
+        Z_vis[~mask] = np.nan
+        Z_vis = np.clip(Z_vis, z_min, z_max)
+
+        # Normalize to 0..255 (uint8)
+        Z_norm = (255.0 * (Z_vis - z_min) / (z_max - z_min)).astype(np.uint8)
+        Z_norm[np.isnan(Z_vis)] = 0
+
+        # Colorize
+        Z_color = cv2.applyColorMap(Z_norm, cv2.COLORMAP_TURBO)
+        Z_color[~mask] = (0, 0, 0)  # invalid = black
+        Z_color = cv2.cvtColor(Z_color, cv2.COLOR_BGR2RGB)
+
+        # Push frame (show depth visualization)
+        self.__frameBufferStereoMono.push((Z_color, (stereoDatas.gyroX, stereoDatas.gyroY, stereoDatas.gyroZ)))
+        return True

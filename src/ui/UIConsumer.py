@@ -41,7 +41,7 @@ class BackendIface(QThread):
     controllerConnected         = pyqtSignal(str)            # Notify UI of controller connection
     controllerBatteryLevel      = pyqtSignal(int)            # Notify UI of controller battery level
     controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
-    paramsLoaded                = pyqtSignal(dict)          # Emitted when calibration parameters are loaded
+    paramsLoaded                = pyqtSignal(dict)           # Emitted when calibration parameters are loaded
     
     # Status signals
     videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
@@ -123,6 +123,8 @@ class BackendIface(QThread):
         self.__videoSavedOnDeviceSignal.connect(self.__handleVideoSavedOnDeviceReply)
         self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
         self.__loadParamsSignal.connect(self.__handleParamsReply)
+        
+        self.setDisparityRenderMode("pointCloud")
 
     
     def __clearTimers(self) -> None:

@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings
 import numpy as np
 import os
 import json
+import cv2
 
 os.environ["QT_LOGGING_RULES"] = "*.debug=false; *.warning=false"
 
@@ -2172,7 +2173,7 @@ class VideoStreamingWindow(QWidget):
 
 
     # ------------------------------------------------------------------
-    # Call this when a new frame arrives (numpy array BGR)
+    # Call this when a new frame arrives (disparity frame)
     # ------------------------------------------------------------------
     def updateFrame(self, frame: np.ndarray, GyroData:tuple[int, int, int]=None):
         if frame is None:

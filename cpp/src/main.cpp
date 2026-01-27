@@ -23,6 +23,6 @@ int main(int argc, char** argv) {
     std::cout << "OpenCV not found at configure time; skipping demo." << std::endl;
 #endif
 
-    // TODO: replace with OpenGL window/context setup and renderer loop.
+
     return 0;
 }
