@@ -17,9 +17,15 @@
             "name": "Debug C++ App (rc_car_app)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/rc_car_app.exe",
-            "args": [],
+            "program": "${workspaceFolder}/build/rc_car_app.exe",
+            "args": ["C:\\Users\\cayod\\Videos\\RC Car\\recording_20260130_211627\\PointCloud.pcl"],
             "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${workspaceFolder}/build/msvc_19.33_cxx17_64_md_release;${env:PATH}"
+                }
+            ],
             "preLaunchTask": "Build C++ App (Debug)",
             "console": "integratedTerminal"
         }

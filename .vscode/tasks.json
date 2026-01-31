@@ -1,132 +1,201 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "Build C++ Module",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "setup_cpp.py",
-                "build"
-            ],
-            "problemMatcher": [],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Build the C++ extension module using CMake"
-        },
-        {
-            "label": "Build C++ Module (Debug)",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "setup_cpp.py",
-                "build",
-                "--debug"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Build the C++ extension module in debug mode"
-        },
-        {
-            "label": "Rebuild C++ Module",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "setup_cpp.py",
-                "rebuild"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Clean and rebuild the C++ extension module"
-        },
-        {
-            "label": "Clean C++ Build",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "setup_cpp.py",
-                "clean"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Clean all C++ build artifacts"
-        },
-        {
-            "label": "Test C++ Module",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "setup_cpp.py",
-                "test"
-            ],
-            "problemMatcher": [],
-            "group": {
-                "kind": "test",
-                "isDefault": true
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Build and run standalone C++ tests"
-        },
-        {
-            "label": "Build C++ App (Debug)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Debug",
-                "--target",
-                "rc_car_app"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Build the standalone C++ app for debugging"
-        },
-        {
-            "label": "Build C++ App (Release)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Release",
-                "--target",
-                "rc_car_app"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "detail": "Build the standalone C++ app for release testing"
-        }
-    ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build C++ Module",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build"
+			],
+			"problemMatcher": [],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the C++ extension module using CMake"
+		},
+		{
+			"label": "Build C++ Module (Debug)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--debug"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the C++ extension module in debug mode"
+		},
+		{
+			"label": "Build C++ Module (CUDA)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--cuda"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the C++ extension module with CUDA support (requires CUDA 12.x)"
+		},
+		{
+			"label": "Build C++ Module (Debug + CUDA)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--debug",
+				"--cuda"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the C++ extension module in debug mode with CUDA support"
+		},
+		{
+			"label": "Rebuild C++ Module",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"rebuild"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Clean and rebuild the C++ extension module"
+		},
+		{
+			"label": "Clean C++ Build",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"clean"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Clean all C++ build artifacts"
+		},
+		{
+			"label": "Test C++ Module",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"test"
+			],
+			"problemMatcher": [],
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build and run standalone C++ tests"
+		},
+		{
+			"label": "Build C++ App (Debug)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--debug",
+				"--cuda",
+				"--target",
+				"rc_car_app"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the standalone C++ app (debug symbols; Ninja uses Release deps)"
+		},
+		{
+			"label": "Fast Build C++ App (Debug)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build-fast",
+				"--debug",
+				"--cuda",
+				"--target",
+				"rc_car_app"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Fast incremental build of rc_car_app (skips configure)"
+		},
+		{
+			"label": "Build C++ App (Release)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--cuda",
+				"--target",
+				"rc_car_app"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build the standalone C++ app (Release)"
+		},
+		{
+			"label": "Build rc_car_app (CUDA)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--cuda",
+				"--target",
+				"rc_car_app"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"detail": "Build rc_car_app target (CUDA)"
+		}
+	]
 }

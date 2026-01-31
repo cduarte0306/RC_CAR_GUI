@@ -539,13 +539,13 @@ class BackendIface(QThread):
             logging.error("Failed to enqueue save video command: %s", exc)
 
 
-    def setRecordingState(self, enabled: bool, path: str) -> None:
+    def setRecordingState(self, enabled: bool, path: str, mode : int) -> None:
         """Set local recording state and path for incoming video frames."""
         if path:
             logging.info("Setting recording path to: %s", path)
             self.__videoStreamer.setRecordingPath(path)
         logging.info("Recording %s", "enabled" if enabled else "disabled")
-        self.__videoStreamer.setRecordingState(enabled)
+        self.__videoStreamer.setRecordingState(enabled, mode)
 
 
     def setDisparityRenderMode(self, mode: str) -> None:
@@ -690,7 +690,84 @@ class BackendIface(QThread):
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue block size command: %s", exc)
-    
+            
+            
+    def setTextureThreshold(self, value: int) -> None:
+        """Set the texture threshold on the camera."""
+        if value < 0:
+            value = 0
+        logging.info("Setting texture threshold to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetTextureThreshold.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue texture threshold command: %s", exc)
+            
+            
+    def setUniquenessRatio(self, value: int) -> None:
+        """Set the uniqueness ratio on the camera."""
+        if value < 0:
+            value = 0
+        logging.info("Setting uniqueness ratio to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetUniquenessRatio.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue uniqueness ratio command: %s", exc)
+            
+            
+    def setPrefilterType(self, value: int) -> None:
+        """Set the prefilter type on the camera."""
+        if value < 0:
+            value = 0
+        logging.info("Setting prefilter type to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetPreFilterType.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue prefilter type command: %s", exc)
+            
+            
+    def setPrefilterCap(self, value: int) -> None:
+        """Set the prefilter cap on the camera."""
+        if value < 1:
+            value = 1
+        logging.info("Setting prefilter cap to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetPreFilterCap.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue prefilter cap command: %s", exc)
+            
+            
+    def setPrefilterSize(self, value: int) -> None:
+        """Set the prefilter size on the camera (must be odd)."""
+        if value % 2 == 0:
+            value -= 1
+        if value < 5:
+            value = 5
+        logging.info("Setting prefilter size to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetPreFilterSize.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue prefilter size command: %s", exc)
+
     
     def __loadStoredVideoList(self) -> None:
         """Load the list of stored videos from the device."""

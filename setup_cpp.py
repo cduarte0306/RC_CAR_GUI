@@ -177,24 +177,213 @@ def clean_build(build_dir, python_modules_dir):
     print_success("Clean complete!")
 
 
-def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", generator=None):
-    """Configure CMake project"""
+def _find_cuda_12():
+    """Find CUDA 12.x installation (required for Open3D compatibility with stdgpu/Thrust)"""
+    if sys.platform != "win32":
+        # On Linux, check standard paths
+        for version in ["12.8", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1", "12.0"]:
+            path = Path(f"/usr/local/cuda-{version}")
+            if path.exists():
+                return str(path / "bin" / "nvcc"), str(path)
+        return None, None
+    
+    # On Windows, check NVIDIA GPU Computing Toolkit
+    base = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if not base.exists():
+        return None, None
+    
+    # Find highest CUDA 12.x version (CUDA 13.x has Thrust/cccl compatibility issues)
+    cuda_12_versions = []
+    for d in base.iterdir():
+        if d.is_dir() and d.name.startswith("v12."):
+            try:
+                version = tuple(map(int, d.name[1:].split(".")))
+                cuda_12_versions.append((version, d))
+            except ValueError:
+                continue
+    
+    if cuda_12_versions:
+        cuda_12_versions.sort(reverse=True)
+        best_version, best_path = cuda_12_versions[0]
+        nvcc = best_path / "bin" / "nvcc.exe"
+        if nvcc.exists():
+            return str(nvcc), str(best_path)
+    
+    return None, None
+
+
+def _ensure_zlib_junction(build_dir):
+    """Ensure ZLIB junction exists for Open3D build compatibility.
+    
+    Open3D's CMake passes ZLIB_ROOT=<build>/zlib to some external projects,
+    but actually installs ZLIB to <build>/_deps/open3d-build/zlib.
+    This creates a junction to fix the path mismatch.
+    """
+    if sys.platform != "win32":
+        return  # Only needed on Windows
+    
+    zlib_junction = build_dir / "zlib"
+    zlib_actual = build_dir / "_deps" / "open3d-build" / "zlib"
+    
+    # If junction already exists and points to correct location, we're done
+    if zlib_junction.exists():
+        return
+    
+    # If actual ZLIB dir exists, create junction
+    if zlib_actual.exists():
+        print_info(f"Creating ZLIB junction: {zlib_junction} -> {zlib_actual}")
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(zlib_junction), str(zlib_actual)],
+                check=True, capture_output=True
+            )
+            print_success("ZLIB junction created")
+        except subprocess.CalledProcessError as e:
+            print_info(f"Could not create junction (may need admin): {e}")
+
+
+def is_configured(build_dir, build_type, use_cuda):
+    """Check if the build directory is already configured with matching settings.
+    
+    Returns True if we can skip reconfiguration.
+    """
+    cache_file = build_dir / "CMakeCache.txt"
+    ninja_file = build_dir / "build.ninja"
+    
+    # Must have CMakeCache.txt
+    if not cache_file.exists():
+        return False
+    
+    # For Ninja builds, must have build.ninja
+    if not ninja_file.exists():
+        return False
+    
+    # Check if settings match
+    try:
+        cache_content = cache_file.read_text()
+        
+        # Check build type (we force Release for everything now, but check anyway)
+        if "CMAKE_BUILD_TYPE:STRING=Release" not in cache_content:
+            print_info("Build type changed, reconfiguring...")
+            return False
+        
+        # Check CUDA setting
+        cuda_on = "RC_CAR_USE_CUDA:BOOL=ON" in cache_content
+        if cuda_on != use_cuda:
+            print_info("CUDA setting changed, reconfiguring...")
+            return False
+        
+        # Check if CMakeLists.txt is newer than CMakeCache.txt
+        cmakelists = build_dir.parent / "CMakeLists.txt"
+        if cmakelists.exists():
+            if cmakelists.stat().st_mtime > cache_file.stat().st_mtime:
+                print_info("CMakeLists.txt changed, reconfiguring...")
+                return False
+        
+        return True
+    except Exception as e:
+        print_info(f"Could not check config: {e}")
+        return False
+
+
+def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", generator=None, use_cuda=False, force=False):
+    """Configure CMake project.
+    
+    Skips reconfiguration if build is already configured with matching settings.
+    Use force=True to always reconfigure.
+    """
+    # Check if we can skip configuration
+    if not force and is_configured(build_dir, build_type, use_cuda):
+        print_info("Build already configured, skipping CMake configure (use 'rebuild' to force)")
+        _ensure_zlib_junction(build_dir)
+        return True
+    
     print_header("Configuring CMake Project")
     
     # Create build directory
     build_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure ZLIB junction exists for Open3D compatibility
+    _ensure_zlib_junction(build_dir)
+    
+    # Use Ninja if available (properly respects CMAKE_CUDA_COMPILER unlike VS generator)
+    ninja_path = shutil.which("ninja")
+    # Also check in Python Scripts directory where pip installs ninja
+    if not ninja_path:
+        try:
+            import ninja
+            ninja_bin = Path(ninja.BIN_DIR) / ("ninja.exe" if sys.platform == "win32" else "ninja")
+            if ninja_bin.exists():
+                ninja_path = str(ninja_bin)
+        except ImportError:
+            pass
+    
+    if ninja_path and not generator:
+        GEN = "Ninja"
+        print_info(f"Using Ninja generator (better CUDA compiler control): {ninja_path}")
+        # Add ninja directory to PATH for CMake to find it
+        ninja_dir = str(Path(ninja_path).parent)
+        os.environ["PATH"] = ninja_dir + os.pathsep + os.environ.get("PATH", "")
+    else:
+        GEN = generator or "Visual Studio 17 2022"
     
     # CMake configure command
     base_cmd = [
         cmake_path,
         f"-S{source_dir}",
         f"-B{build_dir}",
+        f"-G{GEN}",
         f"-DCMAKE_BUILD_TYPE={build_type}",
     ]
-    python_candidates = list(_iter_python_candidates())
-    python_candidates.append(None)
+    
+    # Add CUDA support option
+    if use_cuda:
+        base_cmd.append("-DRC_CAR_USE_CUDA=ON")
+        print_info("CUDA support ENABLED (Open3D with CUDA)")
+    else:
+        base_cmd.append("-DRC_CAR_USE_CUDA=OFF")
+        print_info("CUDA support DISABLED (CPU-only build)")
+    
+    # Only add architecture flag for Visual Studio generator
+    if "Visual Studio" in GEN:
+        base_cmd.append("-A x64")
+    
+    # Use CUDA 12.x for Open3D compatibility (CUDA 13.x has Thrust header issues with stdgpu)
+    if use_cuda:
+        cuda_nvcc, cuda_root = _find_cuda_12()
+        if cuda_nvcc and os.path.exists(cuda_nvcc):
+            base_cmd.append(f"-DCMAKE_CUDA_COMPILER={cuda_nvcc}")
+            base_cmd.append(f"-DCUDAToolkit_ROOT={cuda_root}")
+            # Also set environment variable so CUDA tools use correct path
+            os.environ["CUDA_PATH"] = cuda_root
+            print_info(f"Using CUDA 12.x for Open3D compatibility: {cuda_root}")
+        else:
+            print_error("CUDA 12.x not found!")
+            print_error("Open3D requires CUDA 12.x (CUDA 13.x has Thrust/cccl compatibility issues)")
+            print_info("Install CUDA 12.x toolkit or build without --cuda flag")
+            return False
 
-    def attempt_configure(use_generator):
+    # Prefer the current Python interpreter for consistency
+    # Store it before vcvars potentially modifies PATH
+    preferred_python = sys.executable
+    if not _python_has_dev(preferred_python):
+        print_info(f"Current Python ({preferred_python}) lacks dev headers, searching for alternatives...")
+        python_candidates = list(_iter_python_candidates())
+        python_candidates.append(None)
+    else:
+        python_candidates = [preferred_python]
+
+    # For Ninja on Windows, we need to run from VS Developer environment
+    use_vcvars = sys.platform == "win32" and GEN == "Ninja"
+    vcvars_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    
+    def quote_arg(arg):
+        """Quote argument if it contains spaces"""
+        if ' ' in arg and not arg.startswith('"'):
+            return f'"{arg}"'
+        return arg
+    
+    def attempt_configure():
         for python_exe in python_candidates:
             cmd = list(base_cmd)
             if python_exe:
@@ -204,29 +393,24 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
                 ])
                 print_info(f"Using Python for CMake: {python_exe}")
 
-            if use_generator:
-                if generator:
-                    cmd.extend(["-G", generator])
-                elif sys.platform == "win32":
-                    cmd.extend(["-G", "Visual Studio 17 2022"])
-
             print_info(f"Running: {' '.join(cmd)}")
             try:
-                subprocess.run(cmd, check=True, cwd=source_dir)
+                if use_vcvars and os.path.exists(vcvars_path):
+                    # Run through VS Developer Command Prompt for Ninja builds
+                    # Quote each argument that contains spaces
+                    quoted_cmd = ' '.join(quote_arg(c) for c in cmd)
+                    shell_cmd = f'call "{vcvars_path}" >nul 2>&1 && {quoted_cmd}'
+                    subprocess.run(shell_cmd, check=True, cwd=source_dir, shell=True)
+                else:
+                    subprocess.run(cmd, check=True, cwd=source_dir)
                 return True
             except subprocess.CalledProcessError:
                 continue
         return False
 
-    if attempt_configure(use_generator=True):
+    if attempt_configure():
         print_success("CMake configuration successful!")
         return True
-
-    if generator or sys.platform == "win32":
-        print_info("Retrying without generator specification...")
-        if attempt_configure(use_generator=False):
-            print_success("CMake configuration successful (default generator)!")
-            return True
 
     print_error("Unable to configure CMake project")
     return False
@@ -236,24 +420,54 @@ def build_project(cmake_path, build_dir, build_type="Release", target=None):
     """Build the CMake project"""
     print_header("Building C++ Project")
     
+    # Ensure ZLIB junction exists (may be needed after first partial build)
+    _ensure_zlib_junction(build_dir)
+    
     # CMake build command
     cmd = [
         cmake_path,
         "--build", str(build_dir),
         "--config", build_type,
+        "--parallel"
     ]
-    
+
     if target:
         cmd.extend(["--target", target])
     
-    # Add parallel build flag
-    cmd.extend(["--parallel"])
-    
     print_info(f"Running: {' '.join(cmd)}")
     
+    # Check if we need vcvars (Ninja builds on Windows)
+    vcvars_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    use_vcvars = sys.platform == "win32" and os.path.exists(vcvars_path) and (build_dir / "build.ninja").exists()
+    
+    def quote_arg(arg):
+        """Quote argument if it contains spaces"""
+        if ' ' in str(arg) and not str(arg).startswith('"'):
+            return f'"{arg}"'
+        return str(arg)
+    
     try:
-        subprocess.run(cmd, check=True)
+        if use_vcvars:
+            quoted_cmd = ' '.join(quote_arg(c) for c in cmd)
+            shell_cmd = f'call "{vcvars_path}" >nul 2>&1 && {quoted_cmd}'
+            subprocess.run(shell_cmd, check=True, shell=True)
+        else:
+            subprocess.run(cmd, check=True)
         print_success("Build successful!")
+
+        if sys.platform == "win32" and target == "rc_car_app":
+            try:
+                tbb_dll_candidates = list(build_dir.rglob("tbb12.dll"))
+                if tbb_dll_candidates:
+                    tbb_src = tbb_dll_candidates[0]
+                    tbb_dst = build_dir / "tbb12.dll"
+                    if not tbb_dst.exists() or tbb_dst.stat().st_mtime < tbb_src.stat().st_mtime:
+                        shutil.copy2(tbb_src, tbb_dst)
+                        print_info(f"Copied runtime dependency: {tbb_dst}")
+                else:
+                    print_info("Note: tbb12.dll not found in build tree; rc_car_app.exe may require PATH to include its location")
+            except Exception as e:
+                print_info(f"Could not copy runtime DLLs: {e}")
         return True
     except subprocess.CalledProcessError as e:
         print_error(f"Build failed with exit code {e.returncode}")
@@ -381,17 +595,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python setup_cpp.py build          # Build the C++ module
+  python setup_cpp.py build          # Build the C++ module (CPU-only)
   python setup_cpp.py clean          # Clean build artifacts
   python setup_cpp.py rebuild        # Clean and rebuild
   python setup_cpp.py test           # Build and run C++ tests
   python setup_cpp.py build --debug  # Build in debug mode
+  python setup_cpp.py build --cuda   # Build with CUDA support (requires CUDA 12.x)
+  python setup_cpp.py build --debug --cuda  # Debug build with CUDA
+  python setup_cpp.py build --cuda --target rc_car_cpp  # Fast incremental: build only the Python module
+  python setup_cpp.py build --cuda --target rc_car_app  # Fast incremental: build only the standalone app
         """
     )
     
     parser.add_argument(
         "command",
-        choices=["build", "clean", "rebuild", "test"],
+        choices=["build", "build-fast", "clean", "rebuild", "test", "configure"],
         help="Command to execute"
     )
     
@@ -406,6 +624,17 @@ Examples:
         help="CMake generator to use (e.g., 'Visual Studio 17 2022')"
     )
     
+    parser.add_argument(
+        "--cuda",
+        action="store_true",
+        help="Enable CUDA support (requires CUDA 12.x toolkit, default: OFF)"
+    )
+    
+    parser.add_argument(
+        "--target",
+        help="Build only a specific target (e.g., 'rc_car_cpp', 'rc_car_app'). Faster incremental builds."
+    )
+    
     args = parser.parse_args()
     
     # Get directories
@@ -414,11 +643,13 @@ Examples:
     python_modules_dir = root_dir / "python_modules"
     
     build_type = "Debug" if args.debug else "Release"
+    use_cuda = args.cuda
     
     print_header("RC Car C++ Build System")
     print_info(f"Root directory: {root_dir}")
     print_info(f"Build directory: {build_dir}")
     print_info(f"Build type: {build_type}")
+    print_info(f"CUDA support: {'ENABLED' if use_cuda else 'DISABLED'}")
     
     # Find required tools
     cmake_path = find_cmake()
@@ -431,14 +662,33 @@ Examples:
         clean_build(build_dir, python_modules_dir)
         return 0
     
+    elif args.command == "configure":
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
+            return 1
+        
+        print_header("Configuration Complete!")
+        return 0
+    
     elif args.command == "build":
-        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator):
+        target = getattr(args, 'target', None)
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
             return 1
         
-        if not build_project(cmake_path, build_dir, build_type):
+        if not build_project(cmake_path, build_dir, build_type, target=target):
             return 1
+
+        print_header("Build Complete!")
+        print_success("C++ module is ready to use")
+        print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {MODULE_NAME}")
+        return 0
+
+    elif args.command == "build-fast":
+        target = getattr(args, 'target', None)
+        print(target)
+        # if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
+        #     return 1
         
-        if not verify_python_module(python_modules_dir, build_dir, build_type):
+        if not build_project(cmake_path, build_dir, build_type, target=target):
             return 1
         
         print_header("Build Complete!")
@@ -449,7 +699,7 @@ Examples:
     elif args.command == "rebuild":
         clean_build(build_dir, python_modules_dir)
         
-        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator):
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
             return 1
         
         if not build_project(cmake_path, build_dir, build_type):
@@ -462,7 +712,7 @@ Examples:
         return 0
     
     elif args.command == "test":
-        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator):
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
             return 1
         
         if not build_project(cmake_path, build_dir, build_type):

@@ -544,6 +544,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RC Control Studio")
         self.setMinimumSize(QSize(1080, 720))
         self.setWindowIcon(QIcon("icons/car.svg"))
+        self.__firstShow = True
 
         # Welcome
         self.__welcomeWindow = WelcomeWindow(self)
@@ -640,6 +641,36 @@ class MainWindow(QMainWindow):
         self.__consumer.start()
 
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_MainWindow__firstShow", False):
+            return
+        self.__firstShow = False
+
+        screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        avail = screen.availableGeometry()
+
+        # Size to something "big" by default, but never larger than the usable screen.
+        target_w = min(avail.width(), max(self.minimumWidth(), int(avail.width() * 0.92)))
+        target_h = min(avail.height(), max(self.minimumHeight(), int(avail.height() * 0.92)))
+        self.resize(target_w, target_h)
+
+        # Place slightly above center so it doesn't feel "low".
+        x = avail.left() + max(0, (avail.width() - self.width()) // 2)
+        y = avail.top() + max(20, int(avail.height() * 0.05))
+        if y + self.height() > avail.bottom():
+            y = max(avail.top() + 12, avail.bottom() - self.height() - 12)
+
+        self.move(int(x), int(y))
+        self.raise_()
+        self.activateWindow()
+
+
     def __connectSignals(self):
         """
         Handles connection of UI signals
@@ -678,6 +709,15 @@ class MainWindow(QMainWindow):
         self.__streamWindow.qualityChanged.connect(self.__consumer.setVideoQuality)
         self.__streamWindow.numDisparitiesChanged.connect(self.__consumer.setNumDisparities)
         self.__streamWindow.blockSizeChanged.connect(self.__consumer.setBlockSize)
+
+        self.__streamWindow.preFilterCapChanged.connect(self.__consumer.setPrefilterCap)
+        self.__streamWindow.textureThresholdChanged.connect(self.__consumer.setTextureThreshold)
+        self.__streamWindow.uniquenessRatioChanged.connect(self.__consumer.setUniquenessRatio)
+        self.__streamWindow.preFilterTypeChanged.connect(self.__consumer.setPrefilterType)
+        # self.__streamWindow.speckleWindowSizeChanged.connect(self.__consumer.setSpeckleWindowSize)
+        # self.__streamWindow.speckleRangeChanged.connect(self.__consumer.setSpeckleRange)
+        # self.__streamWindow.disparityMaxDiffChanged.connect(self.__consumer.setDisparityMaxDiff)
+
         self.__streamWindow.streamOutRequested.connect(self.__consumer.startVideoStream)
         self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
         self.__streamWindow.calibrationCaptureRequested.connect(self.__consumer.captureCalibrationSample)

@@ -51,7 +51,7 @@ class CameraCommand(ctypes.Structure):
         ("data", val_type_t),
         ("payloadLen", ctypes.c_uint32),
     ]
-    
+
 class CamCommands(Enum):
     CmdStartStream          = 0
     CmdStopStream           = auto()
@@ -59,6 +59,13 @@ class CamCommands(Enum):
     CmdSetFps               = auto()
     CmdSetQuality           = auto()
     CmdSetNumDisparities    = auto()
+    
+    CmdSetPreFilterType     = auto()
+    CmdSetPreFilterSize     = auto()
+    CmdSetPreFilterCap      = auto()
+    CmdSetTextureThreshold  = auto()
+    CmdSetUniquenessRatio   = auto()
+    
     CmdSetBlockSize         = auto()
     CmdRdParams             = auto()
     CmdClrVideoRec          = auto()

@@ -1,27 +1,33 @@
 # RC_CAR_GUI
-GUI for RC car telemetry and controls with high-performance C++ extensions.
+GUI for RC car telemetry and controls with high-performance C++ extensions and real-time 3D visualization.
 
 ## Features
 - PyQt6-based graphical interface for RC car control
-- High-performance C++ extensions via Pybind11 for robotics calculations
+- High-performance C++ extensions via pybind11 for robotics calculations
+- **GPU-accelerated 3D point cloud visualization** using Open3D + CUDA
 - OpenGL-backed 3D visualization widget with Python bindings
-- CMake-based build system with MSVC support
+- CMake-based build system with MSVC/Ninja support
 - Standalone C++ testing capabilities
 
 ## Prerequisites
 
 ### Python Dependencies
-- Python 3.8 or higher
+- Python 3.10+ with development headers
 - PyQt6
 - opencv-python
 - pydualsense
 - zeroconf
 
 ### C++ Build Dependencies
-- CMake 3.15 or higher
-- Microsoft Visual Studio (with C++ Desktop Development workload) on Windows
+- **CMake 3.15+**
+- **Visual Studio 2022** with "Desktop development with C++" workload (Windows)
 - GCC or Clang on Linux/macOS
-- OpenGL development libraries (e.g., `libgl1-mesa-dev` and `libglu1-mesa-dev` on Linux)
+- **Ninja** (recommended, auto-installed via pip)
+- OpenGL development libraries
+
+### Optional: GPU Acceleration
+- **CUDA 12.x** (12.0-12.8) - Required for GPU-accelerated 3D processing
+- ⚠️ **CUDA 13.x is NOT supported** (Thrust/cccl header incompatibility with Open3D's stdgpu)
 
 ## Installation
 
@@ -35,24 +41,43 @@ git submodule update --init --recursive
 ### 2. Install Python Dependencies
 ```bash
 pip install -r requirements.txt
+pip install ninja  # Recommended for faster builds
 ```
 
 ### 3. Build C++ Extensions
+
+#### CPU-only Build (simplest)
 ```bash
 python setup_cpp.py build
 ```
 
-This will:
-- Configure CMake with the appropriate compiler
-- Build the C++ extension module as a Python-importable DLL
-- Place the compiled module in the `python_modules/` directory
+#### GPU-accelerated Build (requires CUDA 12.x)
+```bash
+python setup_cpp.py build --cuda
+```
 
-#### Build Commands
-- `python setup_cpp.py build` - Build the C++ module (Release mode)
-- `python setup_cpp.py build --debug` - Build in debug mode
-- `python setup_cpp.py rebuild` - Clean and rebuild
-- `python setup_cpp.py clean` - Remove all build artifacts
-- `python setup_cpp.py test` - Build and run standalone C++ tests
+#### Debug Build (debug symbols for your code, Open3D stays Release)
+```bash
+python setup_cpp.py build --debug --cuda
+```
+
+This will:
+- Configure CMake with the appropriate compiler (Ninja preferred)
+- Fetch and build Open3D with CUDA support (first build takes 30-60 minutes)
+- Build the `rc_car_cpp` Python extension module
+- Place the compiled module in `python_modules/`
+
+### Build Commands Reference
+| Command | Description |
+|---------|-------------|
+| `python setup_cpp.py build` | CPU-only Release build |
+| `python setup_cpp.py build --cuda` | GPU-accelerated Release build |
+| `python setup_cpp.py build --debug` | Debug build (CPU-only) |
+| `python setup_cpp.py build --debug --cuda` | Debug build with CUDA |
+| `python setup_cpp.py rebuild` | Clean and rebuild |
+| `python setup_cpp.py rebuild --cuda` | Clean rebuild with CUDA |
+| `python setup_cpp.py clean` | Remove all build artifacts |
+| `python setup_cpp.py test` | Build and run C++ tests |
 
 ## Running the Application
 
@@ -133,10 +158,27 @@ build/test_cpp
 Install CMake from https://cmake.org/download/ and add it to your PATH.
 
 ### Visual Studio not found (Windows)
-Install Visual Studio with "Desktop development with C++" workload from https://visualstudio.microsoft.com/
+Install Visual Studio 2022 with "Desktop development with C++" workload from https://visualstudio.microsoft.com/
+
+### CUDA build fails with "Thrust" or "cccl" errors
+You have CUDA 13.x installed. Open3D requires CUDA 12.x due to Thrust header reorganization in CUDA 13.
+- Install CUDA 12.x alongside CUDA 13.x
+- The build script auto-detects and uses CUDA 12.x when available
+- Or build without CUDA: `python setup_cpp.py build` (no `--cuda` flag)
+
+### Build fails at CUDA compilation step with iterator errors
+This happens with Debug builds + CUDA on MSVC. The `--debug` flag now automatically:
+- Builds Open3D in Release mode (avoids MSVC iterator conflicts)
+- Keeps debug symbols for your code (`rc_car_app`, `test_cpp`)
 
 ### Module import fails
-Ensure the module was built successfully and the `python_modules/` directory contains the compiled module (.pyd on Windows, .so on Linux).
+- Ensure the build completed successfully
+- Check that `python_modules/rc_car_cpp.pyd` (Windows) or `.so` (Linux) exists
+- Verify Python version matches the one used during build
+
+### First build is very slow
+Normal! First build fetches and compiles Open3D + dependencies (~30-60 minutes).
+Subsequent builds are incremental and much faster.
 
 ## License
 [Add your license information here]

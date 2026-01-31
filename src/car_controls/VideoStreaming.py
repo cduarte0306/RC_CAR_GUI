@@ -87,6 +87,22 @@ class StereoData(ctypes.Structure):
         ("elemSize", ctypes.c_uint16),   # Frame element sizess
         ("Q", ctypes.c_double * 16),  # Rectification matrix values
     ]
+    
+    
+class _3DPoints(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("X", ctypes.c_float),
+        ("Y", ctypes.c_float),
+        ("Z", ctypes.c_float)
+    ]
+    
+class PointCloudHdr(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("Magic", ctypes.c_uint8 * 10),
+        ("Length", ctypes.c_uint64)
+    ]
 
 
 class VideoStreamer:
@@ -113,8 +129,11 @@ class VideoStreamer:
         Mono = 0
         Stereo = 1
         Disparity = 2
+        
+    class RecordingType(Enum):
+        RecordVideo      = 0
+        RecordPointCloud = auto()
 
-    _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
     def __init__(self, streamInAdapter: UDP = None, streamOutAdapter: UDP = None, path: str = ""):
         self.__cap = None
@@ -152,6 +171,7 @@ class VideoStreamer:
         self.__streamOutBuff = CircularBuffer(100)
         self.__recordPath: str = ""
         self.__isRecording: bool = False
+        self.__recordingMode : VideoStreamer.RecordingType = VideoStreamer.RecordingType.RecordVideo
         self.__recordWriter = None
         self.__recordFilename: str = ""
         self.__recordSize: tuple[int, int] | None = None
@@ -199,7 +219,7 @@ class VideoStreamer:
         self.__recordPath = path
         
     
-    def setRecordingState(self, isRecording: bool) -> None:
+    def setRecordingState(self, isRecording: bool, state : int) -> None:
         """
         Enable or disable recording of incoming video frames.
 
@@ -211,6 +231,7 @@ class VideoStreamer:
         if not self.__isRecording and isRecording:
             self.__close_record_writer()
         self.__isRecording = isRecording
+        self.__recordingMode = VideoStreamer.RecordingType(state)
 
 
     def setDisparityRenderMode(self, mode: str) -> None:
@@ -219,71 +240,6 @@ class VideoStreamer:
             logging.warning("Unknown disparity render mode: %s", mode)
             return
         self.__disparityRenderMode = mode
-        
-        
-    def __process_disparity_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Process a disparity frame for visualization based on the selected render mode.
-
-        Args:
-            frame (np.ndarray): Input disparity frame.
-
-        Returns:
-            np.ndarray: Processed frame for visualization.
-        """
-        if frame is None:
-            return frame
-
-        disp = frame
-        if disp.ndim == 3:
-            if disp.shape[2] == 4:
-                disp = cv2.cvtColor(disp, cv2.COLOR_BGRA2GRAY)
-            else:
-                disp = cv2.cvtColor(disp, cv2.COLOR_BGR2GRAY)
-        if disp.ndim != 2:
-            return frame
-
-        disp32f = np.maximum(disp.astype(np.float32), 0.0)
-        disp8U = np.zeros_like(disp32f, dtype=np.uint8)
-        valid_mask = (disp32f > 0.0).astype(np.uint8)
-        if valid_mask.ndim != 2:
-            valid_mask = valid_mask[:, :, 0]
-        if valid_mask.dtype != np.uint8:
-            valid_mask = valid_mask.astype(np.uint8)
-        valid_count = cv2.countNonZero(valid_mask)
-        if valid_count > 0:
-            valid_vals = disp32f[valid_mask > 0]
-            if valid_vals.size > 0:
-                vmin = float(np.percentile(valid_vals, 5))
-                vmax = float(np.percentile(valid_vals, 95))
-            else:
-                vmin, vmax, _, _ = cv2.minMaxLoc(disp32f, mask=valid_mask)
-            if vmax > vmin:
-                scale = 255.0 / (vmax - vmin)
-                shift = -vmin * scale
-                scaled = cv2.convertScaleAbs(disp32f, alpha=scale, beta=shift)
-                np.copyto(disp8U, scaled, where=(valid_mask > 0))
-        else:
-            vmin, vmax = 0.0, 0.0
-
-        now = time.time()
-        if now - self.__disparityDebugLast >= 2.0:
-            total = valid_mask.size
-            ratio = (valid_count / total) if total else 0.0
-            logging.info(
-                "Disparity debug: mode=%s valid=%.2f%% min=%.2f max=%.2f",
-                self.__disparityRenderMode,
-                ratio * 100.0,
-                vmin,
-                vmax,
-            )
-            self.__disparityDebugLast = now
-
-        if self.__disparityRenderMode == "depth":
-            colored = cv2.applyColorMap(disp8U, cv2.COLORMAP_JET)
-            return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-
-        return cv2.cvtColor(disp8U, cv2.COLOR_GRAY2RGB)
 
 
     def __close_record_writer(self) -> None:
@@ -361,7 +317,44 @@ class VideoStreamer:
             self.__close_record_writer()
 
 
+    def __recordPointCloud(self, mat) -> None:
+        if mat is None:
+            return
+        if self.__recordPath == "":
+            logging.warning("Point cloud record path is not set")
+            return
+        try:
+            mat = np.ascontiguousarray(mat)
+        except Exception as exc:
+            logging.error("Failed to prepare point cloud buffer: %s", exc)
+            return
+        
+        pts_xyz  = mat
+        pts_xyz = np.ascontiguousarray(pts_xyz, dtype=np.float32)
 
+        hdr = PointCloudHdr()
+        hdr.Magic = (ctypes.c_uint8 * 10)(*b"POINTCLOUD")
+        hdr.Length = int(pts_xyz.nbytes)
+        bytesOut: bytes = ctypes.string_at(ctypes.byref(hdr), ctypes.sizeof(hdr))
+        bytesOut += pts_xyz.tobytes()
+
+        # Write to file
+        # Append to a single file for the whole recording session.
+        # The file contains repeated [PointCloudHdr][payload] chunks.
+        filename = f"PointCloud.pcl"
+        try:
+            os.makedirs(self.__recordPath, exist_ok=True)
+        except OSError as exc:
+            logging.error("Failed to create point cloud record path %s: %s", self.__recordPath, exc)
+            return
+        path = os.path.join(self.__recordPath, filename)
+        
+        try:
+            with open(path, "ab") as f:
+                f.write(bytesOut)
+            logging.info("Appended point cloud chunk to %s", path)
+        except Exception as e:
+            logging.error("Failed to save point cloud to %s: %s", path, e)
 
     def startStreamOut(self, state: bool) -> None:
         logging.info("Setting stream out to: %s", "ON" if state else "OFF")
@@ -797,53 +790,6 @@ class VideoStreamer:
         return (VideoStreamer.Decodestatus.DecodingError
             if out_of_order
             else VideoStreamer.Decodestatus.DecodingIncomplete)
-        return 
-        
-        if len(self.__segmentMapStereoMono) == self.__expectedSegmentsStereoMono:
-            imgBytes = bytearray()
-            for i in range(self.__expectedSegmentsStereoMono):
-                if i not in self.__segmentMapStereoMono:
-                    logging.warning(f"Missing segment {i} for stereo frame {self.__recvFrameIDStereoMono}")
-                    self.__segmentMapStereoMono.clear()
-                    self.__recvFrameIDStereoMono = None
-                    return VideoStreamer.Decodestatus.DecodingError
-                imgBytes.extend(self.__segmentMapStereoMono[i])
-            gyro_data = StereoData.from_buffer_copy(imgBytes)
-            imgBytes_ = imgBytes[ctypes.sizeof(StereoData):]
-            img = cv2.imdecode(np.frombuffer(imgBytes_, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-
-            if img is None:
-                logging.warning("Failed to decode stereo-mono image for frame %s", self.__recvFrameIDStereoMono)
-                self.__segmentMapStereoMono.clear()
-                self.__recvFrameIDStereoMono = None
-                return VideoStreamer.Decodestatus.DecodingError
-
-            fps_text = self._update_fps()
-            if fps_text:
-                cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-
-            self.__segmentMapStereoMono.clear()
-            self.__recvFrameIDStereoMono = None
-
-            if self.__isRecording and self.__recordPath:
-                overlay_img = img.copy()
-                gyro_text = f"GyroX: {gyro_data.gyroX}, GyroY: {gyro_data.gyroY}, GyroZ: {gyro_data.gyroZ}"
-                cv2.putText(overlay_img, gyro_text, (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                self.__record_frame(overlay_img, "stereo_mono")
-
-            # rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            rgbImage = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # rgbImage = self.__process_disparity_frame(img)
-            # rgbImage = img
-            print(img.dtype, img.shape)
-
-            self.__frameBufferStereoMono.push((rgbImage, (gyro_data.gyroX, gyro_data.gyroY, gyro_data.gyroZ)))
-            return (VideoStreamer.Decodestatus.DecodingError
-                    if out_of_order
-                    else VideoStreamer.Decodestatus.DecodingOK)
-        return (VideoStreamer.Decodestatus.DecodingError
-                if out_of_order
-                else VideoStreamer.Decodestatus.DecodingIncomplete)
 
 
     def __decodePointCloudFrame(self, segmentMap : dict) -> bool:
@@ -887,36 +833,19 @@ class VideoStreamer:
         else:
             frame = buf.reshape(rows, cols, channels)
 
-        # Normalize disparity for display and convert to RGB
-        if frame.ndim == 2:
-            disp = frame
-            if disp.dtype != np.uint8:
-                disp_norm = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX)
-                disp8 = disp_norm.astype(np.uint8, copy=False)
-            else:
-                disp8 = disp
-            rgbImage = cv2.cvtColor(disp8, cv2.COLOR_GRAY2RGB)
-        elif frame.ndim == 3 and frame.shape[2] == 4:
-            rgbImage = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-            disp = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
-        elif frame.ndim == 3 and frame.shape[2] == 3:
-            if frame.dtype != np.uint8:
-                rgbImage = np.clip(frame, 0, 255).astype(np.uint8)
-            else:
-                rgbImage = frame
-            disp = cv2.cvtColor(rgbImage, cv2.COLOR_RGB2GRAY)
-        else:
-            logging.warning("Unexpected disparity frame shape: %s", getattr(frame, "shape", None))
-            return False
-
+        disp = frame
         # Convert to 3D (single-channel disparity only)
         if disp.dtype not in (np.uint8, np.int16, np.int32, np.float32):
-            disp32f = disp.astype(np.float32)
+            disp32f = disp.astype(np.float32) / 16.0
         else:
-            disp32f = disp.astype(np.float32, copy=False)
+            disp32f = disp.astype(np.float32, copy=False) / 16.0
+        disp32f_f = cv2.medianBlur(disp32f, 5)
+        disp32f = disp32f_f
         Q = np.array(q_mat, dtype=np.float32)
         points3d = cv2.reprojectImageTo3D(disp32f, Q)  # HxWx3, float32
         Z = points3d[:, :, 2]  # depth
+        
+        mask = (disp32f > 0) & np.isfinite(Z) & (Z > 0.2) & (Z < 30.0)
 
         # Full per-pixel distance (range) map: sqrt(X^2 + Y^2 + Z^2)
         # Note: invalid disparity -> inf/nan points, handled via mask below.
@@ -956,11 +885,11 @@ class VideoStreamer:
                 f"{name}={float(Z[y, x]):.3f}" for name, (y, x) in sample_points.items()
             )
 
-            print(
+            logging.debug(
                 "Depth debug: disp=%s %s Zmin=%.3f Zmax=%.3f Dmin=%.3f Dmax=%.3f baseline≈%.3f Q[3,2]=%.6f | %s"
                 % (disp32f.dtype, disp32f.shape, z_min_dbg, z_max_dbg, d_min_dbg, d_max_dbg, baseline_est, q32_3_2, sample_str)
             )
-            print(f"Q=\n{q32}")
+            logging.debug(f"Q=\n{q32}")
             self.__depthDebugLast = now
 
         # Valid mask: disparity > 0 is a good first rule
@@ -980,7 +909,17 @@ class VideoStreamer:
         Z_color = cv2.applyColorMap(Z_norm, cv2.COLORMAP_TURBO)
         Z_color[~mask] = (0, 0, 0)  # invalid = black
         Z_color = cv2.cvtColor(Z_color, cv2.COLOR_BGR2RGB)
+        
+        # Save a short snippet of the point cloud or video data
+        if self.__isRecording:
+            if self.__recordingMode == VideoStreamer.RecordingType.RecordVideo:
+                self.__record_frame(Z_color, "")
+            elif self.__recordingMode == VideoStreamer.RecordingType.RecordPointCloud:
+                mask = (disp32f > 0) & np.isfinite(Z) & (Z > 0.2) & (Z < 30.0)
+                self.__recordPointCloud(points3d[mask])
 
         # Push frame (show depth visualization)
         self.__frameBufferStereoMono.push((Z_color, (stereoDatas.gyroX, stereoDatas.gyroY, stereoDatas.gyroZ)))
         return True
+
+

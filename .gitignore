@@ -5,6 +5,10 @@ logs/
 # C++ Build artifacts
 build/
 python_modules/
+.deps/
+.open3d-build/
+.Open3d.dir/
+.Open3D.dir/
 *.pyd
 *.so
 *.dll
