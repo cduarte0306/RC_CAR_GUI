@@ -58,6 +58,9 @@ endif()
 # Store user's requested build type for our own targets
 set(RC_CAR_BUILD_TYPE ${CMAKE_BUILD_TYPE})
 
+# Store user provided option to re-build open3d dependencies
+set(OPEN3D_NO_REBUILD OFF CACHE BOOL "If ON, skip rebuilding Open3D dependencies (useful with pre-built Open3D)" FORCE)
+
 # IMPORTANT: With single-config generators (Ninja/Makefiles), Open3D builds to lib/<CONFIG>/
 # Since Open3D build is massive (~30min), we ALWAYS build everything as Release.
 # For "Debug" builds, we add debug symbols (-Zi) to OUR code only.
@@ -114,6 +117,8 @@ if(OPEN3D_ROOT AND EXISTS "${OPEN3D_ROOT}")
 elseif(EXISTS ${OPEN3D_SOURCE_DIR}/CMakeLists.txt)
     message(STATUS "Building Open3D from submodule: ${OPEN3D_SOURCE_DIR}")
     add_subdirectory(${OPEN3D_SOURCE_DIR})
+elseif(OPEN3D_NO_REBUILD)
+    message(STATUS "OPEN3D_NO_REBUILD is set, skipping Open3D build")
 else()
     message(WARNING "Open3D submodule not found, fetching release archive (this will take a while...)")
     FetchContent_Declare(
@@ -131,6 +136,23 @@ if(RC_CAR_USE_CUDA)
     find_package(CUDAToolkit REQUIRED)
 endif()
 
+# Eigen (required by renderer3d.cpp). Prefer system Eigen3; fallback to Open3D's bundled headers.
+find_package(Eigen3 QUIET)
+set(OPEN3D_EIGEN_DIR "")
+if(NOT OPEN3D_ROOT)
+    # Open3D builds Eigen as an ExternalProject in the build tree
+    set(OPEN3D_EIGEN_DIR "${CMAKE_BINARY_DIR}/_deps/open3d-build/eigen/src/ext_eigen")
+endif()
+if(NOT OPEN3D_EIGEN_DIR)
+    if(EXISTS "${OPEN3D_SOURCE_DIR}/3rdparty/eigen")
+        set(OPEN3D_EIGEN_DIR "${OPEN3D_SOURCE_DIR}/3rdparty/eigen")
+    elseif(DEFINED Open3D_SOURCE_DIR AND EXISTS "${Open3D_SOURCE_DIR}/3rdparty/eigen")
+        set(OPEN3D_EIGEN_DIR "${Open3D_SOURCE_DIR}/3rdparty/eigen")
+    elseif(DEFINED open3d_SOURCE_DIR AND EXISTS "${open3d_SOURCE_DIR}/3rdparty/eigen")
+        set(OPEN3D_EIGEN_DIR "${open3d_SOURCE_DIR}/3rdparty/eigen")
+    endif()
+endif()
+
 # NOTE: CMAKE_BUILD_TYPE is now Release for everything.
 # RC_CAR_BUILD_TYPE holds the user's original request (Debug or Release).
 # We use RC_CAR_BUILD_TYPE to decide whether to add debug symbols to our targets.
@@ -141,14 +163,30 @@ if(MSVC AND RC_CAR_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # Core C++ library (static library for standalone testing)
+# Note: renderer3d.cpp is NOT included here - it's compiled separately per target
+# because it has different dependencies (Open3D for app, none for Python module)
 add_library(rc_car_core STATIC
     cpp/src/math_operations.cpp
-    cpp/src/renderer3d.cpp
 )
 
 target_include_directories(rc_car_core PUBLIC
     ${CMAKE_SOURCE_DIR}/cpp/include
 )
+
+# Attach Eigen include paths to rc_car_core
+if(TARGET Eigen3::Eigen)
+    target_link_libraries(rc_car_core PUBLIC Eigen3::Eigen)
+elseif(TARGET Open3D::Open3D)
+    get_target_property(OPEN3D_INCLUDE_DIRS Open3D::Open3D INTERFACE_INCLUDE_DIRECTORIES)
+    if(OPEN3D_INCLUDE_DIRS)
+        target_include_directories(rc_car_core PUBLIC ${OPEN3D_INCLUDE_DIRS})
+    endif()
+endif()
+
+# Always add Open3D bundled Eigen include path if available
+if(OPEN3D_EIGEN_DIR)
+    target_include_directories(rc_car_core PUBLIC ${OPEN3D_EIGEN_DIR})
+endif()
 
 # Apply debug flags to our core library
 if(MSVC AND RC_CAR_BUILD_TYPE STREQUAL "Debug")
@@ -162,15 +200,21 @@ endif()
 target_link_libraries(rc_car_core PUBLIC OpenGL::GL)
 
 # Python module (DLL/shared library) - always Release for performance
+# Compiles renderer3d.cpp WITH Open3D for Python visualization
 pybind11_add_module(rc_car_cpp
     cpp/src/bindings.cpp
+    cpp/src/renderer3d.cpp
 )
 
-target_link_libraries(rc_car_cpp PRIVATE rc_car_core OpenGL::GL)
+target_link_libraries(rc_car_cpp PRIVATE rc_car_core OpenGL::GL Open3D::Open3D)
+target_compile_definitions(rc_car_cpp PRIVATE RC_CAR_HAS_OPEN3D=1)
 
 target_include_directories(rc_car_cpp PRIVATE
     ${CMAKE_SOURCE_DIR}/cpp/include
 )
+if(RC_CAR_OPEN3D_CPP_INCLUDE_DIR)
+    target_include_directories(rc_car_cpp PRIVATE "${RC_CAR_OPEN3D_CPP_INCLUDE_DIR}")
+endif()
 
 # Set output directory for the Python module
 set_target_properties(rc_car_cpp PROPERTIES
@@ -197,8 +241,10 @@ if(MSVC AND RC_CAR_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # Standalone C++ app for direct debugging
+# Compiles renderer3d.cpp WITH Open3D support
 add_executable(rc_car_app
     cpp/src/main.cpp
+    cpp/src/renderer3d.cpp
 )
 
 target_link_libraries(rc_car_app PRIVATE rc_car_core OpenGL::GL)

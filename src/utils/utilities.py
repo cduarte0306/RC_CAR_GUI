@@ -1,6 +1,7 @@
 import threading
 import logging
 import queue
+import time
 
 class Toolbox:
 
@@ -127,6 +128,11 @@ class Signal:
         with self._lock:
             if callback not in self._callbacks:
                 self._callbacks.append(callback)
+                
+    
+    def setName(self, name: str) -> None:
+        """Set a human-readable name for this signal (used in logging)."""
+        self._name = name
 
 
     def disconnect(self, callback):

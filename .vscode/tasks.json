@@ -196,6 +196,44 @@
 			"problemMatcher": [],
 			"group": "build",
 			"detail": "Build rc_car_app target (CUDA)"
+		},
+		{
+			"label": "Build rc_car_app Module (Skip Open3D Rebuild)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--cuda",
+				"--force-open3d-noconfig"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build rc_car_app target (Skip Open3D Rebuild)"
+		},
+		{
+			"label": "Build C++ Module (Skip Open3D)",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"setup_cpp.py",
+				"build",
+				"--cuda",
+				"--force-open3d-noconfig",
+				"--target",
+				"rc_car_cpp"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"detail": "Build Python module without rebuilding Open3D (fast)"
 		}
 	]
 }

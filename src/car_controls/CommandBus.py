@@ -59,14 +59,17 @@ class CamCommands(Enum):
     CmdSetFps               = auto()
     CmdSetQuality           = auto()
     CmdSetNumDisparities    = auto()
+    CmdSetBlockSize         = auto()
     
     CmdSetPreFilterType     = auto()
     CmdSetPreFilterSize     = auto()
     CmdSetPreFilterCap      = auto()
     CmdSetTextureThreshold  = auto()
     CmdSetUniquenessRatio   = auto()
-    
-    CmdSetBlockSize         = auto()
+    CmdSetSpeckleWindowSize = auto()
+    CmdSetSpeckleRange      = auto()
+    CmdSetDisp12MaxDiff     = auto()
+
     CmdRdParams             = auto()
     CmdClrVideoRec          = auto()
     CmdSaveVideo            = auto()
@@ -75,6 +78,7 @@ class CamCommands(Enum):
     CmdDeleteVideo          = auto()
     CmdCalibrationSetState  = auto()
     CmdCalibrationWrtParams = auto()
+    CmdCalibrationReset     = auto()
     CmdCalibrationSave      = auto()
     
 
@@ -306,6 +310,8 @@ class CommandBus:
                     seq_id = self._seq_id & 0xFFFF
                     self._seq_id = (seq_id + 1) & 0xFFFF
                     # Track all commands so replies can be matched by sequence id
+                    if cmd == None:
+                        print("CommandBus: cmd is None!")
                     self.__commandSentBank[seq_id] = cmd
                     packet_bytes = self._build_packet(cmd, seq_id)
                 ok = self._udp.send(packet_bytes)

@@ -1,3 +1,4 @@
+from html import parser
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer
 from utils.utilities import CircularBuffer
 
@@ -13,6 +14,7 @@ import numpy as np
 import subprocess
 import re
 import ctypes
+import socket
 
 from threading import Thread, Event
 import json
@@ -20,7 +22,7 @@ import time
 import logging
 
 from utils.utilities import Signal
-
+import configparser
 
 
 class BackendIface(QThread):
@@ -57,31 +59,61 @@ class BackendIface(QThread):
     def __init__(self):
         super().__init__()
         
+        parser = configparser.ConfigParser()
+        self.__config_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "config", "rc-car-viewer-config.ini")
+        )
+        parser.read(self.__config_path)
+        # Video stream-out local adapter (Ethernet) selection.
+        # Backwards-compatible fallback to the old `adapter_ip` key.
+        self.__video_out_adapter_ip: str = (
+            parser.get("settings", "video_out_adapter_ip", fallback="") or ""
+        ).strip() or (parser.get("settings", "adapter_ip", fallback="0.0.0.0") or "0.0.0.0").strip()
+        if self.__video_out_adapter_ip and self.__video_out_adapter_ip != "0.0.0.0":
+            try:
+                socket.inet_aton(self.__video_out_adapter_ip)
+            except OSError:
+                logging.warning(
+                    "Invalid video_out_adapter_ip in config (%s); falling back to Auto",
+                    self.__video_out_adapter_ip,
+                )
+                self.__video_out_adapter_ip = "0.0.0.0"
+        
         # Create the network manager
         self.__networkManager : NetworkManager = NetworkManager()
 
         # Create the adapters
         # Controller adapter now listens for replies via callback
+        self.__controllerAdapterEth       : UDP = self.__networkManager.openAdapter(
+            "controllerEth", (BackendIface.CONTROLLER_PORT, "192.168.1.10", "192.168.1.1"), self.__controllerReplyCallbackEth
+        )
+        
         self.__controllerAdapter       : UDP = self.__networkManager.openAdapter(
             "controller", (BackendIface.CONTROLLER_PORT, ""), self.__controllerReplyCallback
         )
         # Create outbound adapter first (no receive callback)
-        self.__videoStreamerOutAdapter : UDP = self.__networkManager.openAdapter("streamOut" , (BackendIface.STREAM_PORT, "192.168.1.10"), recvBuffSize=65507)
+        # self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter("streamOut" , (BackendIface.STREAM_PORT, "192.168.1.10"), self.__videoReceivedEthCallback, recvBuffSize=65507)    
+        self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter(
+            "streamOut", (BackendIface.STREAM_PORT, "192.168.1.10", "192.168.1.1"), recvBuffSize=65507 ,recvCallback=self.__videoReceivedEthCallback
+        )
 
         # Create buffers and streamer before wiring the inbound adapter callback
         self.__videoBuffer    : CircularBuffer = CircularBuffer(100)
         self.__tlmBuffer      : CircularBuffer = CircularBuffer(100)
         
         # Create VideoStreamer without inbound adapter; inbound frames will be fed via callback
-        self.__videoStreamer  : VideoStreamer  = VideoStreamer(None, self.__videoStreamerOutAdapter)
+        self.__videoStreamer  : VideoStreamer  = VideoStreamer(None, self.__videoStreameEthAdapter)
 
         # Now open the inbound adapter and pass our callback (starts receive thread)
-        self.__videoStreamerInAdapter  : UDP = self.__networkManager.openAdapter("streamerIn", (BackendIface.STREAM_PORT, ""), self.__videoReceivedCallback, 65507)
+        self.__videoStreamerInAdapter  : UDP = self.__networkManager.openAdapter("streamerIn", (BackendIface.STREAM_PORT, ""), self.__videoReceivedCallback, recvBuffSize=65507)
         self.__commandBus     : CommandBus     = CommandBus(self.__controllerAdapter)
+        self.__commandBusEth  : CommandBus     = CommandBus(self.__controllerAdapterEth)
         self.__controller     : Controller     = Controller(self.__commandBus)
 
         # Open adapter for motor telemetry at port 6000
-        self.__telemetryAdapter : UDP = self.__networkManager.openAdapter("telemetry", (BackendIface.TELEMETRY_PORT, ""), self.__telemetryReceivedCallback)
+        self.__telemetryAdapter : UDP = self.__networkManager.openAdapter(
+            "telemetry", (BackendIface.TELEMETRY_PORT, ""), self.__telemetryReceivedCallback
+        )
 
         # controllerAdapter.deviceFound.connect(self.__deviceFound)
         self.__devicesPool : list  = []
@@ -124,7 +156,55 @@ class BackendIface(QThread):
         self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
         self.__loadParamsSignal.connect(self.__handleParamsReply)
         
-        self.setDisparityRenderMode("pointCloud")
+        self.setDisparityRenderMode("depth")
+
+
+    def getVideoOutAdapterIp(self) -> str:
+        return self.__video_out_adapter_ip
+
+
+    @pyqtSlot(str)
+    def setVideoOutAdapterIp(self, adapter_ip: str) -> None:
+        """Select the local adapter used ONLY for the Ethernet video stream-out socket.
+
+        Main control/telemetry comms stay on the default OS routing (WLAN).
+        """
+        adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
+
+        if adapter_ip != "0.0.0.0":
+            try:
+                socket.inet_aton(adapter_ip)
+            except OSError:
+                logging.warning("Ignoring invalid video_out_adapter_ip selection: %s", adapter_ip)
+                return
+
+        if adapter_ip == self.__video_out_adapter_ip:
+            return
+
+        self.__video_out_adapter_ip = adapter_ip
+        self.__persist_video_out_adapter_ip(adapter_ip)
+
+        # Rebind only the outbound video socket. Use port 0 (ephemeral) to avoid conflicts with streamerIn.
+        try:
+            if adapter_ip != "0.0.0.0":
+                self.__videoStreameEthAdapter.rebind(adapter_ip, 0)
+            else:
+                self.__videoStreameEthAdapter.rebind("0.0.0.0", 0)
+        except Exception as exc:
+            logging.error("Failed to apply video_out_adapter_ip=%s: %s", adapter_ip, exc)
+
+
+    def __persist_video_out_adapter_ip(self, adapter_ip: str) -> None:
+        try:
+            parser = configparser.ConfigParser()
+            parser.read(self.__config_path)
+            if "settings" not in parser:
+                parser["settings"] = {}
+            parser["settings"]["video_out_adapter_ip"] = adapter_ip
+            with open(self.__config_path, "w", encoding="utf-8") as f:
+                parser.write(f)
+        except Exception as exc:
+            logging.warning("Failed to persist video_out_adapter_ip to config: %s", exc)
 
     
     def __clearTimers(self) -> None:
@@ -160,6 +240,14 @@ class BackendIface(QThread):
             self.__commandBus.processReply(data)
         except Exception as exc:
             logging.error("Failed to emit controller reply: %s", exc)
+
+
+    def __controllerReplyCallbackEth(self, data: bytes) -> None:
+        """Handle async replies arriving on the Ethernet controller socket."""
+        try:
+            self.__commandBusEth.processReply(data)
+        except Exception as exc:
+            logging.error("Failed to emit ethernet controller reply: %s", exc)
 
 
     def __on_host_discovered(self, ip: str) -> None:
@@ -203,13 +291,23 @@ class BackendIface(QThread):
             data (bytes): Video frame data
         """
         self.__videoStreamer.setFrame(data)
+        
+        
+    def __videoReceivedEthCallback(self, data : bytes) -> None:
+        """
+        Video frame reception callback over Ethernet
+
+        Args:
+            data (bytes): Video frame data
+        """
+        self.__videoStreamer.setFrameEth(data)
 
 
     def __videoStreamOutThread(self, packet:bytes) -> None:
         """
         Video stream out thread
         """
-        ret = self.__videoStreamerOutAdapter.send(packet)
+        ret = self.__videoStreameEthAdapter.send(packet)
         if not ret:
             logging.error("Failed to transmit frame over UDP")
 
@@ -768,6 +866,57 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue prefilter size command: %s", exc)
 
+
+    def setSpeckleWindowSize(self, value: int) -> None:
+        """Set speckle window size on the camera."""
+        if value < 0:
+            value = 0
+        if value > 255:
+            value = 255
+        logging.info("Setting speckle window size to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetSpeckleWindowSize.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue speckle window size command: %s", exc)
+
+
+    def setSpeckleRange(self, value: int) -> None:
+        """Set speckle range on the camera."""
+        if value < 0:
+            value = 0
+        if value > 255:
+            value = 255
+        logging.info("Setting speckle range to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetSpeckleRange.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue speckle range command: %s", exc)
+
+
+    def setDisp12MaxDiff(self, value: int) -> None:
+        """Set disp12 max diff on the camera."""
+        if value < 0:
+            value = 0
+        if value > 255:
+            value = 255
+        logging.info("Setting disp12 max diff to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetDisp12MaxDiff.value
+        cam_cmd.data.u8 = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue disp12 max diff command: %s", exc)
+
     
     def __loadStoredVideoList(self) -> None:
         """Load the list of stored videos from the device."""
@@ -846,7 +995,9 @@ class BackendIface(QThread):
         while not self.__pingShutdownEvent.is_set():
             if self.__connected_ip:
                 try:
+                    # Ping over both command buses
                     self.__commandBus.submit(Command(commands.CMD_NOOP.value, 0))
+                    self.__commandBusEth.submit(Command(commands.CMD_NOOP.value, 0))
                 except Exception as exc:
                     logging.error("Failed to enqueue ping command: %s", exc)
             time.sleep(2)

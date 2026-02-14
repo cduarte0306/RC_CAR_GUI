@@ -8,6 +8,8 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <thread>
+#include <mutex>
 
 #include "math_operations.h"
 #include "renderer3d.h"
@@ -18,6 +20,11 @@
 #include <Eigen/Dense>
 
 #include <open3d/Open3D.h>
+#include <random>
+#include <condition_variable>
+
+
+// #define DEBUG_PC 0
 
 
 #pragma pack(push, 1)
@@ -98,6 +105,7 @@ std::vector<std::vector<PointXYZ>> unpackPcl(std::string filePath) {
 
 
 int main(int argc, char** argv) {
+#ifndef DEBUG_PC
     std::cout << "=== RC Car C++ Point Cloud Demo ===" << std::endl;
 
     if (argc < 2) {
@@ -133,8 +141,36 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to open Visalizer window\r\n";
         exit(-1);
     }
+
+    int nb_neighbors = 20;
+    double std_ratio = 2.0;
+
     vis.AddGeometry(pcd);
     vis.GetRenderOption().point_size_ = 2.0;
+
+    bool hasNewPoints_ = false;
+    std::condition_variable dataCv_;
+    std::mutex dataMutex_;
+
+    std::vector<PointXYZ> latestPoints_;
+
+    std::thread feedingLoop = std::thread([&] {
+        while(true) {
+            if (frames.empty()) {
+                continue;
+            }
+
+            for (const auto& frame : frames) {
+                {
+                    std::lock_guard<std::mutex> lock(dataMutex_);
+                    latestPoints_ = frame;
+                    hasNewPoints_ = true;
+                }
+                dataCv_.notify_one();
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+        }
+    });
 
     std::cout << "Live updating display... (close window to quit)" << std::endl;
     std::vector<PointXYZ> frame;
@@ -142,47 +178,149 @@ int main(int argc, char** argv) {
     std::cout << "Opening visualization window... (close window to quit)" << std::endl;
     bool view_initialized = false;
     while (true) {
-        for (const auto& currFrame : frames) {
-            pcd->Clear();
-            pcd->points_.reserve(currFrame.size());
-            pcd->colors_.reserve(currFrame.size());
+        std::vector<PointXYZ> points;
+        {
+            std::unique_lock<std::mutex> lock(dataMutex_);
+            dataCv_.wait_for(lock, std::chrono::milliseconds(16), [&] {
+                return hasNewPoints_;
+            });
 
-            float zMin = std::numeric_limits<float>::infinity();
-            float zMax = -std::numeric_limits<float>::infinity();
-            for (const auto& p : currFrame) {
-                zMin = (std::min)(zMin, p.z);
-                zMax = (std::max)(zMax, p.z);
+            if (hasNewPoints_) {
+                points = std::move(latestPoints_);
+                latestPoints_.clear();
+                hasNewPoints_ = false;
             }
-            const float zRange = (std::isfinite(zMin) && std::isfinite(zMax) && zMax > zMin) ? (zMax - zMin) : 1.0f;
-
-            for (const auto& p : currFrame) {
-                pcd->points_.push_back((Eigen::Vector3d{
-                    static_cast<double>(p.x), 
-                    static_cast<double>(p.y), 
-                    static_cast<double>(p.z)}
-                ));
-                const float t = (p.z - zMin) / zRange;
-                double r = static_cast<double>(t);
-                if (r < 0.0) r = 0.0;
-                if (r > 1.0) r = 1.0;
-                const double b = 1.0 - r;
-                pcd->colors_.push_back({r, 0.0, b});
-            }
-
-            if (!view_initialized) {
-                vis.ResetViewPoint(true);
-                view_initialized = true;
-            }
-
-            vis.UpdateGeometry(pcd);
-            if (!vis.PollEvents()) break;;
-            vis.UpdateRender();
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
+
+        if (points.empty()) {
+            continue;
+        }
+
+        std::vector<PointXYZ> safePoints = points;
+
+        pcd->Clear();
+        pcd->points_.reserve(safePoints.size());
+        pcd->colors_.reserve(safePoints.size());
+
+        pcd->RemoveStatisticalOutliers(nb_neighbors, std_ratio);
+
+        float zMin = std::numeric_limits<float>::infinity();
+        float zMax = -std::numeric_limits<float>::infinity();
+        for (const auto& p : safePoints) {
+            zMin = (std::min)(zMin, p.z);
+            zMax = (std::max)(zMax, p.z);
+        }
+        const float zRange = (std::isfinite(zMin) && std::isfinite(zMax) && zMax > zMin) ? (zMax - zMin) : 1.0f;
+
+        for (const auto& p : safePoints) {
+            pcd->points_.push_back((Eigen::Vector3d{
+                static_cast<double>(p.x), 
+                static_cast<double>(p.y), 
+                static_cast<double>(p.z)}
+            ));
+            const float t = (p.z - zMin) / zRange;
+            double r = static_cast<double>(t);
+            if (r < 0.0) r = 0.0;
+            if (r > 1.0) r = 1.0;
+            const double b = 1.0 - r;
+            pcd->colors_.push_back({r, 0.0, b});
+        }
+
+        if (!view_initialized) {
+            vis.ResetViewPoint(true);
+            view_initialized = true;
+        }
+
+        vis.UpdateGeometry(pcd);
+        if (!vis.PollEvents()) break;;
+        vis.UpdateRender();
     }
 
-    
+    feedingLoop.detach();
     std::cout << "Visualization closed" << std::endl;
+#else
+    using namespace open3d;
+
+    // 1) Create a point cloud
+    auto pcd = std::make_shared<geometry::PointCloud>();
+
+    // 2) Fill it with random points (uniform in a cube)
+    constexpr int kNumPoints = 5000;
+
+    std::mt19937 rng(42); // fixed seed for repeatability
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
+    pcd->points_.reserve(kNumPoints);
+    pcd->colors_.reserve(kNumPoints);
+
+    int numPointsX = 100;
+    int numPointsY = 10;
+    int numPointsZ = 100;
+
+
+    open3d::visualization::Visualizer vis;
+    // Position the window near the top of the primary screen so it doesn't open "too low".
+    if (!vis.CreateVisualizerWindow("Live Point Cloud", 1280, 720, 80, 30)) {
+        std::cerr << "Failed to open Visalizer window\r\n";
+        exit(-1);
+    }
+    vis.AddGeometry(pcd);
+    vis.GetRenderOption().point_size_ = 2.0;
+    bool view_initialized = false;
+    double z = 10.0;
+    bool dir = false;
+    double px, py;
+
+    while (true)
+    {
+        pcd->Clear();
+        pcd->points_.reserve(kNumPoints);
+
+        for (int x = 0; x < numPointsX; ++x) {
+            for (int y = 0; y < numPointsY; ++y) {
+                px = (static_cast<double>(x) / (numPointsX - 1)) * 2.0 - 1.0;
+                py = (static_cast<double>(y) / (numPointsY - 1)) * 2.0 - 1.0;
+                pcd->points_.emplace_back(px, py, z);
+            }
+
+            z += (dir) ? (1.0/numPointsX) : -(1.0/numPointsX) ;
+            if (z >= 1.0) {
+                dir = false;
+            }
+            if (z <= -1.0) {
+                dir = true;
+            }
+        }
+        pcd->colors_.reserve(kNumPoints);
+        
+        // for (int i = 0; i < kNumPoints; ++i) {
+        //     double x = dist(rng);
+        //     double y = dist(rng);
+        //     double z = dist(rng);
+        //     pcd->points_.emplace_back(x, y, z);
+
+        //     // Simple color mapping: normalize [-1,1] -> [0,1]
+        //     Eigen::Vector3d c((x + 1.0) * 0.5, (y + 1.0) * 0.5, (z + 1.0) * 0.5);
+        //     pcd->colors_.push_back(c);
+        // }
+
+        // 3) (Optional) estimate normals for nicer shading
+        pcd->EstimateNormals(
+            geometry::KDTreeSearchParamHybrid(/*radius=*/0.2, /*max_nn=*/30));
+
+        if (!view_initialized) {
+            vis.ResetViewPoint(true);
+            view_initialized = true;
+        }
+
+        vis.UpdateGeometry(pcd);
+        if (!vis.PollEvents()) break;;
+        vis.UpdateRender();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    
+
+#endif
     return 0;
 }

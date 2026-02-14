@@ -78,6 +78,7 @@ This will:
 | `python setup_cpp.py rebuild --cuda` | Clean rebuild with CUDA |
 | `python setup_cpp.py clean` | Remove all build artifacts |
 | `python setup_cpp.py test` | Build and run C++ tests |
+| `python setup_cpp.py install` | Install the python package
 
 ## Running the Application
 

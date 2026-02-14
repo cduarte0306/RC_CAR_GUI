@@ -384,6 +384,9 @@ class VideoStreamingWindow(QWidget):
     textureThresholdChanged         = pyqtSignal(int)              # Emitted when texture threshold slider is released
     uniquenessRatioChanged          = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
     preFilterCapChanged             = pyqtSignal(int)              # Emitted when pre-filter cap slider is released
+    speckleWindowSizeChanged         = pyqtSignal(int)              # Emitted when speckle window size slider is released
+    speckleRangeChanged              = pyqtSignal(int)              # Emitted when speckle range slider is released
+    disparityMaxDiffChanged          = pyqtSignal(int)              # Emitted when disp12 max diff slider is released
     
     blockSizeChanged                = pyqtSignal(int)              # Emitted when block size slider is released
     uploadVideoClicked              = pyqtSignal(str)              # File selected signal
@@ -685,7 +688,7 @@ class VideoStreamingWindow(QWidget):
         disparitiesLabel = QLabel("Disparities")
         disparitiesLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
         self.__disparitiesSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__disparitiesSlider.setRange(8, 128)
+        self.__disparitiesSlider.setRange(8, 512)
         self.__disparitiesSlider.setValue(64)
         self.__disparitiesSlider.setSingleStep(1)
         self.__disparitiesSlider.setPageStep(8)
@@ -703,6 +706,17 @@ class VideoStreamingWindow(QWidget):
         self.__blockSlider.setStyleSheet(self.__qualitySlider.styleSheet())
         self.__blockValueLabel = QLabel(str(self.__blockSlider.value()))
         self.__blockValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        prefilterTypeLabel = QLabel("Prefilter Type")
+        prefilterTypeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__preFilterTypeSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__preFilterTypeSlider.setRange(0, 1)
+        self.__preFilterTypeSlider.setValue(0)
+        self.__preFilterTypeSlider.setSingleStep(1)
+        self.__preFilterTypeSlider.setPageStep(1)
+        self.__preFilterTypeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__preFilterTypeValueLabel = QLabel(str(self.__preFilterTypeSlider.value()))
+        self.__preFilterTypeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
         
         prefilterCapLabel = QLabel("Prefilter Cap")
         prefilterCapLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
@@ -755,6 +769,39 @@ class VideoStreamingWindow(QWidget):
         self.__uniquenessRatioValueLabel = QLabel(str(self.__uniquenessRatioSlider.value()))
         self.__uniquenessRatioValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
+        speckleWindowSizeLabel = QLabel("Speckle Window Size")
+        speckleWindowSizeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__speckleWindowSizeSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__speckleWindowSizeSlider.setRange(0, 255)
+        self.__speckleWindowSizeSlider.setValue(0)
+        self.__speckleWindowSizeSlider.setSingleStep(1)
+        self.__speckleWindowSizeSlider.setPageStep(5)
+        self.__speckleWindowSizeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__speckleWindowSizeValueLabel = QLabel(str(self.__speckleWindowSizeSlider.value()))
+        self.__speckleWindowSizeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        speckleRangeLabel = QLabel("Speckle Range")
+        speckleRangeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__speckleRangeSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__speckleRangeSlider.setRange(0, 255)
+        self.__speckleRangeSlider.setValue(0)
+        self.__speckleRangeSlider.setSingleStep(1)
+        self.__speckleRangeSlider.setPageStep(5)
+        self.__speckleRangeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__speckleRangeValueLabel = QLabel(str(self.__speckleRangeSlider.value()))
+        self.__speckleRangeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        disp12MaxDiffLabel = QLabel("Disp12 Max Diff")
+        disp12MaxDiffLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__disp12MaxDiffSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__disp12MaxDiffSlider.setRange(0, 255)
+        self.__disp12MaxDiffSlider.setValue(0)
+        self.__disp12MaxDiffSlider.setSingleStep(1)
+        self.__disp12MaxDiffSlider.setPageStep(5)
+        self.__disp12MaxDiffSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__disp12MaxDiffValueLabel = QLabel(str(self.__disp12MaxDiffSlider.value()))
+        self.__disp12MaxDiffValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
         renderLabel = QLabel("RGB Depth")
         renderLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
         self.__disparityRenderButtons: dict[str, QPushButton] = {}
@@ -802,6 +849,8 @@ class VideoStreamingWindow(QWidget):
             self.__disparitiesValueLabel,
             blockLabel,
             self.__blockValueLabel,
+            prefilterTypeLabel,
+            self.__preFilterTypeValueLabel,
             prefilterCapLabel,
             self.__preFilterCapValueLabel,
             prefilterSizeLabel,
@@ -810,6 +859,12 @@ class VideoStreamingWindow(QWidget):
             self.__textureThresholdValueLabel,
             uniquenessRatioLabel,
             self.__uniquenessRatioValueLabel,
+            speckleWindowSizeLabel,
+            self.__speckleWindowSizeValueLabel,
+            speckleRangeLabel,
+            self.__speckleRangeValueLabel,
+            disp12MaxDiffLabel,
+            self.__disp12MaxDiffValueLabel,
             renderLabel,
         ):
             widget.setFixedHeight(18)
@@ -817,20 +872,28 @@ class VideoStreamingWindow(QWidget):
             self.__qualitySlider,
             self.__disparitiesSlider,
             self.__blockSlider,
+            self.__preFilterTypeSlider,
             self.__preFilterCapSlider,
             self.__preFilterSizeSlider,
             self.__textureThresholdSlider,
             self.__uniquenessRatioSlider,
+            self.__speckleWindowSizeSlider,
+            self.__speckleRangeSlider,
+            self.__disp12MaxDiffSlider,
         ):
             slider.setFixedHeight(18)
         for value_label in (
             self.__qualityValueLabel,
             self.__disparitiesValueLabel,
             self.__blockValueLabel,
+            self.__preFilterTypeValueLabel,
             self.__preFilterCapValueLabel,
             self.__preFilterSizeValueLabel,
             self.__textureThresholdValueLabel,
             self.__uniquenessRatioValueLabel,
+            self.__speckleWindowSizeValueLabel,
+            self.__speckleRangeValueLabel,
+            self.__disp12MaxDiffValueLabel,
         ):
             value_label.setFixedWidth(36)
 
@@ -858,6 +921,12 @@ class VideoStreamingWindow(QWidget):
         blockRow.addWidget(self.__blockSlider, stretch=1)
         blockRow.addWidget(self.__blockValueLabel)
 
+        prefilterTypeRow = QHBoxLayout()
+        prefilterTypeRow.setSpacing(8)
+        prefilterTypeRow.addWidget(prefilterTypeLabel)
+        prefilterTypeRow.addWidget(self.__preFilterTypeSlider, stretch=1)
+        prefilterTypeRow.addWidget(self.__preFilterTypeValueLabel)
+
         prefilterCapRow = QHBoxLayout()
         prefilterCapRow.setSpacing(8)
         prefilterCapRow.addWidget(prefilterCapLabel)
@@ -882,6 +951,24 @@ class VideoStreamingWindow(QWidget):
         uniquenessRatioRow.addWidget(self.__uniquenessRatioSlider, stretch=1)
         uniquenessRatioRow.addWidget(self.__uniquenessRatioValueLabel)
 
+        speckleWindowSizeRow = QHBoxLayout()
+        speckleWindowSizeRow.setSpacing(8)
+        speckleWindowSizeRow.addWidget(speckleWindowSizeLabel)
+        speckleWindowSizeRow.addWidget(self.__speckleWindowSizeSlider, stretch=1)
+        speckleWindowSizeRow.addWidget(self.__speckleWindowSizeValueLabel)
+
+        speckleRangeRow = QHBoxLayout()
+        speckleRangeRow.setSpacing(8)
+        speckleRangeRow.addWidget(speckleRangeLabel)
+        speckleRangeRow.addWidget(self.__speckleRangeSlider, stretch=1)
+        speckleRangeRow.addWidget(self.__speckleRangeValueLabel)
+
+        disp12MaxDiffRow = QHBoxLayout()
+        disp12MaxDiffRow.setSpacing(8)
+        disp12MaxDiffRow.addWidget(disp12MaxDiffLabel)
+        disp12MaxDiffRow.addWidget(self.__disp12MaxDiffSlider, stretch=1)
+        disp12MaxDiffRow.addWidget(self.__disp12MaxDiffValueLabel)
+
         renderRow = QHBoxLayout()
         renderRow.setSpacing(8)
         renderRow.addWidget(renderLabel)
@@ -893,10 +980,14 @@ class VideoStreamingWindow(QWidget):
         videoControlLayout.addLayout(qualityRow)
         videoControlLayout.addLayout(disparitiesRow)
         videoControlLayout.addLayout(blockRow)
+        videoControlLayout.addLayout(prefilterTypeRow)
         videoControlLayout.addLayout(prefilterCapRow)
         videoControlLayout.addLayout(prefilterSizeRow)
         videoControlLayout.addLayout(textureThresholdRow)
         videoControlLayout.addLayout(uniquenessRatioRow)
+        videoControlLayout.addLayout(speckleWindowSizeRow)
+        videoControlLayout.addLayout(speckleRangeRow)
+        videoControlLayout.addLayout(disp12MaxDiffRow)
         videoControlLayout.addLayout(renderRow)
         viewerSettingsLayout.addWidget(videoControlCard)
 
@@ -911,7 +1002,6 @@ class VideoStreamingWindow(QWidget):
             "Settings", viewerSettingsScroll, expanded=viewer_settings_expanded, max_expanded_height=300
         )
         self.__viewerSettingsSection.toggled.connect(lambda v: self.__settings.setValue("viewerSettingsExpanded", v))
-        viewerLayout.addWidget(self.__viewerSettingsSection)
         self.__tabs.addTab(viewerTab, "Viewer")
 
         # Controls tab
@@ -925,7 +1015,6 @@ class VideoStreamingWindow(QWidget):
         controlsLayout.setSpacing(12)
         controlsTab.setLayout(controlsLayout)
 
-        controls_settings_expanded = self.__settings.value("controlsSettingsExpanded", False, bool)
         controlsBody = QWidget()
         controlsBody.setStyleSheet("background-color: transparent;")
         controlsBodyLayout = QVBoxLayout(controlsBody)
@@ -937,14 +1026,10 @@ class VideoStreamingWindow(QWidget):
         controlsScroll.setFrameShape(QFrame.Shape.NoFrame)
         controlsScroll.setStyleSheet(scroll_style)
         controlsScroll.setWidget(controlsBody)
+        controlsLayout.addWidget(controlsScroll)
 
-        self.__controlsSettingsSection = CollapsibleSection(
-            "Settings", controlsScroll, expanded=controls_settings_expanded, max_expanded_height=520
-        )
-        self.__controlsSettingsSection.toggled.connect(
-            lambda v: (self.__settings.setValue("controlsSettingsExpanded", v), self.__resizeControlsPopout())
-        )
-        controlsLayout.addWidget(self.__controlsSettingsSection)
+        # Move stream configuration controls to the Stream Controls tab.
+        controlsBodyLayout.addWidget(self.__viewerSettingsSection)
 
         # Stream mode buttons (Stereo/Training)
         streamCard = QFrame()
@@ -1845,10 +1930,14 @@ class VideoStreamingWindow(QWidget):
         self.__disparitiesSlider.sliderReleased.connect(self.__emitDisparitiesChanged)
         self.__blockSlider.valueChanged.connect(self.__updateBlockLabel)
         self.__blockSlider.sliderReleased.connect(self.__emitBlockChanged)
+        self.__preFilterTypeSlider.valueChanged.connect(self.__updatePreFilterTypeLabel)
         self.__preFilterCapSlider.valueChanged.connect(self.__updatePreFilterCapLabel)
         self.__preFilterSizeSlider.valueChanged.connect(self.__updatePreFilterSizeLabel)
         self.__textureThresholdSlider.valueChanged.connect(self.__updateTextureThresholdLabel)
         self.__uniquenessRatioSlider.valueChanged.connect(self.__updateUniquenessRatioLabel)
+        self.__speckleWindowSizeSlider.valueChanged.connect(self.__updateSpeckleWindowSizeLabel)
+        self.__speckleRangeSlider.valueChanged.connect(self.__updateSpeckleRangeLabel)
+        self.__disp12MaxDiffSlider.valueChanged.connect(self.__updateDisp12MaxDiffLabel)
         
         # Default stream mode
         self.__setStreamMode(self.__streamMode, emit_signal=False)
@@ -1914,6 +2003,19 @@ class VideoStreamingWindow(QWidget):
             value -= 1
         self.blockSizeChanged.emit(max(self.__blockSlider.minimum(), value))
 
+    def __updatePreFilterTypeLabel(self, value: int) -> None:
+        value_int = int(value)
+        if value_int < self.__preFilterTypeSlider.minimum():
+            value_int = self.__preFilterTypeSlider.minimum()
+        if value_int > self.__preFilterTypeSlider.maximum():
+            value_int = self.__preFilterTypeSlider.maximum()
+        if value_int != value:
+            self.__preFilterTypeSlider.blockSignals(True)
+            self.__preFilterTypeSlider.setValue(value_int)
+            self.__preFilterTypeSlider.blockSignals(False)
+        self.__preFilterTypeValueLabel.setText(str(value_int))
+        self.preFilterTypeChanged.emit(value_int)
+
     def __updatePreFilterCapLabel(self, value: int) -> None:
         self.__preFilterCapValueLabel.setText(str(int(value)))
         self.preFilterCapChanged.emit(int(value))
@@ -1936,6 +2038,21 @@ class VideoStreamingWindow(QWidget):
     def __updateUniquenessRatioLabel(self, value: int) -> None:
         self.__uniquenessRatioValueLabel.setText(str(int(value)))
         self.uniquenessRatioChanged.emit(int(value))
+
+    def __updateSpeckleWindowSizeLabel(self, value: int) -> None:
+        value_int = int(value)
+        self.__speckleWindowSizeValueLabel.setText(str(value_int))
+        self.speckleWindowSizeChanged.emit(value_int)
+
+    def __updateSpeckleRangeLabel(self, value: int) -> None:
+        value_int = int(value)
+        self.__speckleRangeValueLabel.setText(str(value_int))
+        self.speckleRangeChanged.emit(value_int)
+
+    def __updateDisp12MaxDiffLabel(self, value: int) -> None:
+        value_int = int(value)
+        self.__disp12MaxDiffValueLabel.setText(str(value_int))
+        self.disparityMaxDiffChanged.emit(value_int)
 
     def __syncFpsCombos(self, value: str) -> None:
         if not hasattr(self, "_VideoStreamingWindow__fpsCombo") or not hasattr(self, "_VideoStreamingWindow__fpsSel"):
@@ -2341,10 +2458,18 @@ class VideoStreamingWindow(QWidget):
     def __resizeControlsPopout(self) -> None:
         if self.__controlsPopout is None or not self.__controlsPopout.isVisible():
             return
-        self.__controlsTab.adjustSize()
-        self.__controlsPopout.adjustSize()
-        self.__controlsPopout.resize(self.__controlsPopout.sizeHint())
-        self.__controlsPopout.updateGeometry()
+        # Do not call adjustSize() here.
+        # This method is invoked during mode switches (e.g. calibration) while the
+        # popout is visible. Calling adjustSize() forces the dialog back to its
+        # minimum sizeHint, which feels like the window "keeps shrinking" while
+        # the user is trying to resize it.
+        hint = self.__controlsPopout.sizeHint()
+        current = self.__controlsPopout.size()
+        target_w = max(current.width(), hint.width(), self.__controlsPopout.minimumWidth())
+        target_h = max(current.height(), hint.height(), self.__controlsPopout.minimumHeight())
+        if target_w != current.width() or target_h != current.height():
+            self.__controlsPopout.resize(target_w, target_h)
+            self.__controlsPopout.updateGeometry()
 
 
     def __placeDialogOnScreen(self, dlg: QDialog, anchor_pos: QPoint | None) -> None:
@@ -2603,6 +2728,10 @@ class VideoStreamingWindow(QWidget):
         if isinstance(pre_filter_cap, int) and hasattr(self, "_VideoStreamingWindow__preFilterCapSlider"):
             self.__preFilterCapSlider.setValue(pre_filter_cap)
 
+        pre_filter_type = params.get("pre_filter_type", params.get("preFilterType"))
+        if isinstance(pre_filter_type, int) and hasattr(self, "_VideoStreamingWindow__preFilterTypeSlider"):
+            self.__preFilterTypeSlider.setValue(pre_filter_type)
+
         pre_filter_size = params.get("pre_filter_size", params.get("preFilterSize"))
         if isinstance(pre_filter_size, int) and hasattr(self, "_VideoStreamingWindow__preFilterSizeSlider"):
             self.__preFilterSizeSlider.setValue(pre_filter_size)
@@ -2614,6 +2743,18 @@ class VideoStreamingWindow(QWidget):
         uniqueness_ratio = params.get("uniqueness_ratio", params.get("uniquenessRatio"))
         if isinstance(uniqueness_ratio, int) and hasattr(self, "_VideoStreamingWindow__uniquenessRatioSlider"):
             self.__uniquenessRatioSlider.setValue(uniqueness_ratio)
+
+        speckle_window_size = params.get("speckle_window_size", params.get("speckleWindowSize"))
+        if isinstance(speckle_window_size, int) and hasattr(self, "_VideoStreamingWindow__speckleWindowSizeSlider"):
+            self.__speckleWindowSizeSlider.setValue(speckle_window_size)
+
+        speckle_range = params.get("speckle_range", params.get("speckleRange"))
+        if isinstance(speckle_range, int) and hasattr(self, "_VideoStreamingWindow__speckleRangeSlider"):
+            self.__speckleRangeSlider.setValue(speckle_range)
+
+        disp12_max_diff = params.get("disp12_max_diff", params.get("disp12MaxDiff"))
+        if isinstance(disp12_max_diff, int) and hasattr(self, "_VideoStreamingWindow__disp12MaxDiffSlider"):
+            self.__disp12MaxDiffSlider.setValue(disp12_max_diff)
         fps = params.get("fps")
         if isinstance(fps, int):
             self.updateFpsDisplay(str(fps))
@@ -2635,7 +2776,38 @@ class VideoStreamingWindow(QWidget):
         if frame is None:
             return
 
-        rgbImage = frame   # Already RGB
+        rgbImage = frame
+        if frame.ndim == 2:
+            gray = frame
+            if gray.dtype != np.uint8:
+                finite = np.isfinite(gray)
+                if not np.any(finite):
+                    return
+                min_v = float(np.min(gray[finite]))
+                max_v = float(np.max(gray[finite]))
+                if max_v <= min_v:
+                    gray = np.zeros_like(gray, dtype=np.uint8)
+                else:
+                    gray = ((gray - min_v) * (255.0 / (max_v - min_v))).astype(np.uint8)
+            rgbImage = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        elif frame.ndim == 3 and frame.shape[2] == 1:
+            gray = frame[:, :, 0]
+            if gray.dtype != np.uint8:
+                finite = np.isfinite(gray)
+                if not np.any(finite):
+                    return
+                min_v = float(np.min(gray[finite]))
+                max_v = float(np.max(gray[finite]))
+                if max_v <= min_v:
+                    gray = np.zeros_like(gray, dtype=np.uint8)
+                else:
+                    gray = ((gray - min_v) * (255.0 / (max_v - min_v))).astype(np.uint8)
+            rgbImage = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        elif frame.ndim == 3 and frame.shape[2] == 3:
+            rgbImage = frame   # Already RGB
+        else:
+            logging.warning("Unsupported frame shape for render: %s", getattr(frame, "shape", None))
+            return
         self.__mutex.lock()
         try:
             # ------------------------------------------------------

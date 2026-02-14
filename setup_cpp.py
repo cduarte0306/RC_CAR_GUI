@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import argparse
 from pathlib import Path
+from setuptools import setup
 
 # Module configuration
 MODULE_NAME = "rc_car_cpp"
@@ -286,9 +287,9 @@ def is_configured(build_dir, build_type, use_cuda):
         return False
 
 
-def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", generator=None, use_cuda=False, force=False):
+def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", generator=None, use_cuda=False, force=False, skip_open3d_fetch=False):
     """Configure CMake project.
-    
+
     Skips reconfiguration if build is already configured with matching settings.
     Use force=True to always reconfigure.
     """
@@ -297,7 +298,7 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
         print_info("Build already configured, skipping CMake configure (use 'rebuild' to force)")
         _ensure_zlib_junction(build_dir)
         return True
-    
+
     print_header("Configuring CMake Project")
     
     # Create build directory
@@ -343,7 +344,11 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
     else:
         base_cmd.append("-DRC_CAR_USE_CUDA=OFF")
         print_info("CUDA support DISABLED (CPU-only build)")
-    
+
+    if skip_open3d_fetch:
+        base_cmd.append("-DOPEN3D_SKIP_FETCH_AND_CONFIGURE=ON")
+        print_info("Skipping Open3D fetch and configure step")
+
     # Only add architecture flag for Visual Studio generator
     if "Visual Studio" in GEN:
         base_cmd.append("-A x64")
@@ -416,13 +421,13 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
     return False
 
 
-def build_project(cmake_path, build_dir, build_type="Release", target=None):
+def build_project(cmake_path, build_dir, build_type="Release", target=None, reconfigOpen3d=False):
     """Build the CMake project"""
     print_header("Building C++ Project")
-    
+
     # Ensure ZLIB junction exists (may be needed after first partial build)
     _ensure_zlib_junction(build_dir)
-    
+
     # CMake build command
     cmd = [
         cmake_path,
@@ -433,7 +438,7 @@ def build_project(cmake_path, build_dir, build_type="Release", target=None):
 
     if target:
         cmd.extend(["--target", target])
-    
+
     print_info(f"Running: {' '.join(cmd)}")
     
     # Check if we need vcvars (Ninja builds on Windows)
@@ -587,7 +592,45 @@ def verify_python_module(python_modules_dir, build_dir, build_type=None):
     except Exception as e:
         print_error(f"Error testing module: {e}")
         return False
-
+    
+    
+def install_python_module(python_modules_dir, build_dir):
+    """Install the Python module to site-packages"""
+    import sysconfig
+    
+    # Find the built module
+    module_patterns = [f"{MODULE_NAME}*.pyd", f"{MODULE_NAME}*.so"]
+    found_modules = []
+    for pattern in module_patterns:
+        found_modules.extend(python_modules_dir.glob(pattern))
+    
+    if not found_modules:
+        print_error("No built module found to install!")
+        print_info("Run 'python setup_cpp.py build' first.")
+        return False
+    
+    # Get site-packages directory
+    site_packages = Path(sysconfig.get_path('purelib'))
+    print_info(f"Installing to: {site_packages}")
+    
+    # Copy module file(s)
+    for module_file in found_modules:
+        dest = site_packages / module_file.name
+        print_info(f"Copying {module_file.name} -> {dest}")
+        shutil.copy2(module_file, dest)
+    
+    # Copy required DLLs (tbb12.dll, etc.) on Windows
+    if sys.platform == "win32":
+        dll_patterns = ["tbb12.dll", "tbb12_debug.dll"]
+        for dll_name in dll_patterns:
+            dll_path = build_dir / dll_name
+            if dll_path.exists():
+                dest = site_packages / dll_name
+                print_info(f"Copying {dll_name} -> {dest}")
+                shutil.copy2(dll_path, dest)
+    
+    print_success(f"Module installed! You can now 'import {MODULE_NAME}' from anywhere.")
+    return True
 
 def main():
     parser = argparse.ArgumentParser(
@@ -596,11 +639,12 @@ def main():
         epilog="""
 Examples:
   python setup_cpp.py build          # Build the C++ module (CPU-only)
+  python setup_cpp.py build --cuda   # Build with CUDA support (requires CUDA 12.x)
+  python setup_cpp.py install        # Install built module to site-packages
   python setup_cpp.py clean          # Clean build artifacts
   python setup_cpp.py rebuild        # Clean and rebuild
   python setup_cpp.py test           # Build and run C++ tests
   python setup_cpp.py build --debug  # Build in debug mode
-  python setup_cpp.py build --cuda   # Build with CUDA support (requires CUDA 12.x)
   python setup_cpp.py build --debug --cuda  # Debug build with CUDA
   python setup_cpp.py build --cuda --target rc_car_cpp  # Fast incremental: build only the Python module
   python setup_cpp.py build --cuda --target rc_car_app  # Fast incremental: build only the standalone app
@@ -609,7 +653,7 @@ Examples:
     
     parser.add_argument(
         "command",
-        choices=["build", "build-fast", "clean", "rebuild", "test", "configure"],
+        choices=["build", "build-fast", "clean", "rebuild", "test", "configure", "install"],
         help="Command to execute"
     )
     
@@ -635,6 +679,12 @@ Examples:
         help="Build only a specific target (e.g., 'rc_car_cpp', 'rc_car_app'). Faster incremental builds."
     )
     
+    parser.add_argument(
+        "--force-open3d-noconfig",  # Sets option in cmake to avoid rebuilding open3d dependencies
+        action="store_true",
+        help="Force skipping Open3D fetch and configure step"
+    )
+
     args = parser.parse_args()
     
     # Get directories
@@ -663,15 +713,15 @@ Examples:
         return 0
     
     elif args.command == "configure":
-        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda, skip_open3d_fetch=args.force_open3d_noconfig):
             return 1
         
         print_header("Configuration Complete!")
         return 0
-    
+
     elif args.command == "build":
         target = getattr(args, 'target', None)
-        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
+        if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda, skip_open3d_fetch=args.force_open3d_noconfig):
             return 1
         
         if not build_project(cmake_path, build_dir, build_type, target=target):
@@ -680,20 +730,26 @@ Examples:
         print_header("Build Complete!")
         print_success("C++ module is ready to use")
         print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {MODULE_NAME}")
+        print_info("Or install globally with: python setup_cpp.py install")
+        
+        return 0
+
+    elif args.command == "install":
+        print_header("Installing Python Module")
+        if not install_python_module(python_modules_dir, build_dir):
+            return 1
         return 0
 
     elif args.command == "build-fast":
         target = getattr(args, 'target', None)
-        print(target)
-        # if not configure_cmake(cmake_path, root_dir, build_dir, build_type, args.generator, use_cuda):
-        #     return 1
-        
+
         if not build_project(cmake_path, build_dir, build_type, target=target):
             return 1
         
         print_header("Build Complete!")
         print_success("C++ module is ready to use")
         print_info(f"Import in Python with: import sys; sys.path.insert(0, '{python_modules_dir}'); import {MODULE_NAME}")
+        print_info("Or install globally with: python setup_cpp.py install")
         return 0
     
     elif args.command == "rebuild":
