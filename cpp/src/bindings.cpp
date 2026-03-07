@@ -20,6 +20,18 @@ PYBIND11_MODULE(rc_car_cpp, m) {
         },
             py::arg("pcData"), py::arg("numPoints"),
             "Render a colored point cloud from numpy array or bytes")
+        .def("setPointCloudColorData", [](rc_car::Renderer3D& self, 
+                                    py::array_t<uint8_t> coordinates,
+                                    py::array_t<uint8_t> rgb, 
+                                    size_t numPoints) {
+            auto pcBuf = coordinates.request();
+            auto colorBuf = rgb.request();
+            char* buffer = static_cast<char*>(pcBuf.ptr);
+            char* rgbBuffer = static_cast<char*>(colorBuf.ptr);
+            self.setPointCloudColorData(buffer, rgbBuffer, numPoints);
+        },
+            py::arg("coordinates"), py::arg("rgb"), py::arg("numPoints"),
+            "Render a RGB point cloud from numpy array or bytes")
         .def("set_clear_color", &rc_car::Renderer3D::setClearColor,
             py::arg("r"), py::arg("g"), py::arg("b"), py::arg("a") = 1.0f,
             "Set the background clear color (RGBA)")

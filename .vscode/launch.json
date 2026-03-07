@@ -33,7 +33,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/rc_car_app.exe",
-            "args": ["C:\\Users\\cayod\\Videos\\RC Car\\recording_20260212_234814\\PointCloud.pcl"],
+            "args": ["C:\\Users\\cayod\\Videos\\RC Car\\recording_20260217_224102\\PointCloud.pcl"],
             "cwd": "${workspaceFolder}",
             "environment": [
                 {

@@ -377,18 +377,15 @@ class VideoStreamingWindow(QWidget):
     simulationSourceSelected        = pyqtSignal()                 # request simulation source
     stereoMonoModeChanged           = pyqtSignal(str)              # "normal", "disparity"
     disparityRenderModeChanged      = pyqtSignal(str)              # "depth", "disparity"
-    numDisparitiesChanged           = pyqtSignal(int)              # Emitted when num disparities slider is released
-    
-    preFilterTypeChanged            = pyqtSignal(int)              # Emitted when pre-filter type slider is released
-    preFilterSizeChanged            = pyqtSignal(int)              # Emitted when pre-filter size slider is released
-    textureThresholdChanged         = pyqtSignal(int)              # Emitted when texture threshold slider is released
+    minDisparitiesChanged           = pyqtSignal(int)              # Emitted when min disparity slider is released
+    maxDisparitiesChanged           = pyqtSignal(int)              # Emitted when max disparity slider is released
+    confidenceThresholdChanged      = pyqtSignal(int)              # Emitted when confidence threshold slider is released
+    p1Changed                       = pyqtSignal(int)              # Emitted when P1 slider is released
+    p2Changed                       = pyqtSignal(int)              # Emitted when P2 slider is released
     uniquenessRatioChanged          = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
-    preFilterCapChanged             = pyqtSignal(int)              # Emitted when pre-filter cap slider is released
-    speckleWindowSizeChanged         = pyqtSignal(int)              # Emitted when speckle window size slider is released
-    speckleRangeChanged              = pyqtSignal(int)              # Emitted when speckle range slider is released
-    disparityMaxDiffChanged          = pyqtSignal(int)              # Emitted when disp12 max diff slider is released
+    zMaxChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
+    zMinChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
     
-    blockSizeChanged                = pyqtSignal(int)              # Emitted when block size slider is released
     uploadVideoClicked              = pyqtSignal(str)              # File selected signal
     deviceVideoLoadRequested        = pyqtSignal(str)              # Device video selection signal
     deviceVideoDeleteRequested      = pyqtSignal(str)              # Device video deletion signal
@@ -685,122 +682,93 @@ class VideoStreamingWindow(QWidget):
         self.__qualityValueLabel = QLabel(str(self.__qualitySlider.value()))
         self.__qualityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        disparitiesLabel = QLabel("Disparities")
-        disparitiesLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__disparitiesSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__disparitiesSlider.setRange(8, 512)
-        self.__disparitiesSlider.setValue(64)
-        self.__disparitiesSlider.setSingleStep(1)
-        self.__disparitiesSlider.setPageStep(8)
-        self.__disparitiesSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__disparitiesValueLabel = QLabel(str(self.__disparitiesSlider.value()))
-        self.__disparitiesValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        minDispLabel = QLabel("Min Disparity")
+        minDispLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__minDisparitySlider = QSlider(Qt.Orientation.Horizontal)
+        self.__minDisparitySlider.setRange(0, 256)
+        self.__minDisparitySlider.setValue(0)
+        self.__minDisparitySlider.setSingleStep(1)
+        self.__minDisparitySlider.setPageStep(8)
+        self.__minDisparitySlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__minDisparityValueLabel = QLabel(str(self.__minDisparitySlider.value()))
+        self.__minDisparityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        blockLabel = QLabel("Block Size")
-        blockLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__blockSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__blockSlider.setRange(5, 21)
-        self.__blockSlider.setValue(5)
-        self.__blockSlider.setSingleStep(1)
-        self.__blockSlider.setPageStep(2)
-        self.__blockSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__blockValueLabel = QLabel(str(self.__blockSlider.value()))
-        self.__blockValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        maxDispLabel = QLabel("Max Disparity")
+        maxDispLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__maxDisparitySlider = QSlider(Qt.Orientation.Horizontal)
+        self.__maxDisparitySlider.setRange(16, 256)
+        self.__maxDisparitySlider.setValue(64)
+        self.__maxDisparitySlider.setSingleStep(16)
+        self.__maxDisparitySlider.setPageStep(32)
+        self.__maxDisparitySlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__maxDisparityValueLabel = QLabel(str(self.__maxDisparitySlider.value()))
+        self.__maxDisparityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        prefilterTypeLabel = QLabel("Prefilter Type")
-        prefilterTypeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__preFilterTypeSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__preFilterTypeSlider.setRange(0, 1)
-        self.__preFilterTypeSlider.setValue(0)
-        self.__preFilterTypeSlider.setSingleStep(1)
-        self.__preFilterTypeSlider.setPageStep(1)
-        self.__preFilterTypeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__preFilterTypeValueLabel = QLabel(str(self.__preFilterTypeSlider.value()))
-        self.__preFilterTypeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
-        
-        prefilterCapLabel = QLabel("Prefilter Cap")
-        prefilterCapLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__preFilterCapSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__preFilterCapSlider.setRange(1, 63)
-        self.__preFilterCapSlider.setValue(31)
-        self.__preFilterCapSlider.setSingleStep(1)
-        self.__preFilterCapSlider.setPageStep(2)
-        self.__preFilterCapSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__preFilterCapValueLabel = QLabel(str(self.__preFilterCapSlider.value()))
-        self.__preFilterCapValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
-        
-        """
-        int preFilterSize;
-        int preFilterCap;
-        int textureThreshold;
-        int uniquenessRatio;
-        """
-        
-        prefilterSizeLabel = QLabel("Prefilter Size")
-        prefilterSizeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__preFilterSizeSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__preFilterSizeSlider.setRange(5, 255)
-        self.__preFilterSizeSlider.setValue(5)
-        self.__preFilterSizeSlider.setSingleStep(2)
-        self.__preFilterSizeSlider.setPageStep(10)
-        self.__preFilterSizeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__preFilterSizeValueLabel = QLabel(str(self.__preFilterSizeSlider.value()))
-        self.__preFilterSizeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
-        
-        textureThresholdLabel = QLabel("Texture Threshold")
-        textureThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__textureThresholdSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__textureThresholdSlider.setRange(0, 100)
-        self.__textureThresholdSlider.setValue(10)
-        self.__textureThresholdSlider.setSingleStep(1)
-        self.__textureThresholdSlider.setPageStep(5)
-        self.__textureThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__textureThresholdValueLabel = QLabel(str(self.__textureThresholdSlider.value()))
-        self.__textureThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        confidenceThresholdLabel = QLabel("Confidence Threshold")
+        confidenceThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__confidenceThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__confidenceThresholdSlider.setRange(0, 65535)
+        self.__confidenceThresholdSlider.setValue(32767)
+        self.__confidenceThresholdSlider.setSingleStep(1)
+        self.__confidenceThresholdSlider.setPageStep(1000)
+        self.__confidenceThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__confidenceThresholdValueLabel = QLabel(str(self.__confidenceThresholdSlider.value()))
+        self.__confidenceThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        uniquenessRatioLabel = QLabel("Uniqueness Ratio")
+        p1Label = QLabel("P1")
+        p1Label.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__p1Slider = QSlider(Qt.Orientation.Horizontal)
+        self.__p1Slider.setRange(1, 255)
+        self.__p1Slider.setValue(3)
+        self.__p1Slider.setSingleStep(1)
+        self.__p1Slider.setPageStep(25)
+        self.__p1Slider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__p1ValueLabel = QLabel(str(self.__p1Slider.value()))
+        self.__p1ValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        p2Label = QLabel("P2")
+        p2Label.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__p2Slider = QSlider(Qt.Orientation.Horizontal)
+        self.__p2Slider.setRange(1, 255)
+        self.__p2Slider.setValue(48)
+        self.__p2Slider.setSingleStep(1)
+        self.__p2Slider.setPageStep(50)
+        self.__p2Slider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__p2ValueLabel = QLabel(str(self.__p2Slider.value()))
+        self.__p2ValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        uniquenessRatioLabel = QLabel("Uniqueness (ratio)")
         uniquenessRatioLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
         self.__uniquenessRatioSlider = QSlider(Qt.Orientation.Horizontal)
         self.__uniquenessRatioSlider.setRange(0, 100)
-        self.__uniquenessRatioSlider.setValue(15)
+        self.__uniquenessRatioSlider.setValue(0)
         self.__uniquenessRatioSlider.setSingleStep(1)
-        self.__uniquenessRatioSlider.setPageStep(5)
+        self.__uniquenessRatioSlider.setPageStep(10)
         self.__uniquenessRatioSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__uniquenessRatioValueLabel = QLabel(str(self.__uniquenessRatioSlider.value()))
+        self.__uniquenessRatioValueLabel = QLabel(f"{self.__uniquenessRatioSlider.value() / 100.0:.2f}")
         self.__uniquenessRatioValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        
+        ZMinLabel = QLabel("Z Min")
+        ZMinLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__ZMinSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__ZMinSlider.setRange(0, 5000)
+        self.__ZMinSlider.setValue(0)
+        self.__ZMinSlider.setSingleStep(1)
+        self.__ZMinSlider.setPageStep(100)
+        self.__ZMinSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__ZMinSliderValueLabel = QLabel(f"{self.__ZMinSlider.value() / 100.0:.2f}")
+        self.__ZMinSliderValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        speckleWindowSizeLabel = QLabel("Speckle Window Size")
-        speckleWindowSizeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__speckleWindowSizeSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__speckleWindowSizeSlider.setRange(0, 255)
-        self.__speckleWindowSizeSlider.setValue(0)
-        self.__speckleWindowSizeSlider.setSingleStep(1)
-        self.__speckleWindowSizeSlider.setPageStep(5)
-        self.__speckleWindowSizeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__speckleWindowSizeValueLabel = QLabel(str(self.__speckleWindowSizeSlider.value()))
-        self.__speckleWindowSizeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
-
-        speckleRangeLabel = QLabel("Speckle Range")
-        speckleRangeLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__speckleRangeSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__speckleRangeSlider.setRange(0, 255)
-        self.__speckleRangeSlider.setValue(0)
-        self.__speckleRangeSlider.setSingleStep(1)
-        self.__speckleRangeSlider.setPageStep(5)
-        self.__speckleRangeSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__speckleRangeValueLabel = QLabel(str(self.__speckleRangeSlider.value()))
-        self.__speckleRangeValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
-
-        disp12MaxDiffLabel = QLabel("Disp12 Max Diff")
-        disp12MaxDiffLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
-        self.__disp12MaxDiffSlider = QSlider(Qt.Orientation.Horizontal)
-        self.__disp12MaxDiffSlider.setRange(0, 255)
-        self.__disp12MaxDiffSlider.setValue(0)
-        self.__disp12MaxDiffSlider.setSingleStep(1)
-        self.__disp12MaxDiffSlider.setPageStep(5)
-        self.__disp12MaxDiffSlider.setStyleSheet(self.__qualitySlider.styleSheet())
-        self.__disp12MaxDiffValueLabel = QLabel(str(self.__disp12MaxDiffSlider.value()))
-        self.__disp12MaxDiffValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        ZMaxLabel = QLabel("Z Max")
+        ZMaxLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__ZMaxSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__ZMaxSlider.setRange(0, 5000)
+        self.__ZMaxSlider.setValue(5000)
+        self.__ZMaxSlider.setSingleStep(1)
+        self.__ZMaxSlider.setPageStep(100)
+        self.__ZMaxSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__ZMaxSliderValueLabel = QLabel(f"{self.__ZMaxSlider.value() / 100.0:.2f}")
+        self.__ZMaxSliderValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
         renderLabel = QLabel("RGB Depth")
         renderLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
@@ -845,57 +813,49 @@ class VideoStreamingWindow(QWidget):
             self.__fpsCombo,
             qualityLabel,
             self.__qualityValueLabel,
-            disparitiesLabel,
-            self.__disparitiesValueLabel,
-            blockLabel,
-            self.__blockValueLabel,
-            prefilterTypeLabel,
-            self.__preFilterTypeValueLabel,
-            prefilterCapLabel,
-            self.__preFilterCapValueLabel,
-            prefilterSizeLabel,
-            self.__preFilterSizeValueLabel,
-            textureThresholdLabel,
-            self.__textureThresholdValueLabel,
+            minDispLabel,
+            self.__minDisparityValueLabel,
+            maxDispLabel,
+            self.__maxDisparityValueLabel,
+            confidenceThresholdLabel,
+            self.__confidenceThresholdValueLabel,
+            p1Label,
+            self.__p1ValueLabel,
+            p2Label,
+            self.__p2ValueLabel,
             uniquenessRatioLabel,
             self.__uniquenessRatioValueLabel,
-            speckleWindowSizeLabel,
-            self.__speckleWindowSizeValueLabel,
-            speckleRangeLabel,
-            self.__speckleRangeValueLabel,
-            disp12MaxDiffLabel,
-            self.__disp12MaxDiffValueLabel,
+            ZMinLabel,
+            self.__ZMinSliderValueLabel,
+            ZMaxLabel,
+            self.__ZMaxSliderValueLabel,
             renderLabel,
         ):
             widget.setFixedHeight(18)
         for slider in (
+            self.__minDisparitySlider,
             self.__qualitySlider,
-            self.__disparitiesSlider,
-            self.__blockSlider,
-            self.__preFilterTypeSlider,
-            self.__preFilterCapSlider,
-            self.__preFilterSizeSlider,
-            self.__textureThresholdSlider,
+            self.__maxDisparitySlider,
+            self.__confidenceThresholdSlider,
+            self.__p1Slider,
+            self.__p2Slider,
             self.__uniquenessRatioSlider,
-            self.__speckleWindowSizeSlider,
-            self.__speckleRangeSlider,
-            self.__disp12MaxDiffSlider,
+            self.__ZMinSlider,
+            self.__ZMaxSlider,
         ):
             slider.setFixedHeight(18)
         for value_label in (
+            self.__minDisparityValueLabel,
             self.__qualityValueLabel,
-            self.__disparitiesValueLabel,
-            self.__blockValueLabel,
-            self.__preFilterTypeValueLabel,
-            self.__preFilterCapValueLabel,
-            self.__preFilterSizeValueLabel,
-            self.__textureThresholdValueLabel,
+            self.__maxDisparityValueLabel,
+            self.__confidenceThresholdValueLabel,
+            self.__p1ValueLabel,
+            self.__p2ValueLabel,
             self.__uniquenessRatioValueLabel,
-            self.__speckleWindowSizeValueLabel,
-            self.__speckleRangeValueLabel,
-            self.__disp12MaxDiffValueLabel,
+            self.__ZMinSliderValueLabel,
+            self.__ZMaxSliderValueLabel,
         ):
-            value_label.setFixedWidth(36)
+            value_label.setFixedWidth(48)
 
         fpsRow = QHBoxLayout()
         fpsRow.setSpacing(8)
@@ -909,65 +869,53 @@ class VideoStreamingWindow(QWidget):
         qualityRow.addWidget(self.__qualitySlider, stretch=1)
         qualityRow.addWidget(self.__qualityValueLabel)
 
-        disparitiesRow = QHBoxLayout()
-        disparitiesRow.setSpacing(8)
-        disparitiesRow.addWidget(disparitiesLabel)
-        disparitiesRow.addWidget(self.__disparitiesSlider, stretch=1)
-        disparitiesRow.addWidget(self.__disparitiesValueLabel)
+        minDispRow = QHBoxLayout()
+        minDispRow.setSpacing(8)
+        minDispRow.addWidget(minDispLabel)
+        minDispRow.addWidget(self.__minDisparitySlider, stretch=1)
+        minDispRow.addWidget(self.__minDisparityValueLabel)
 
-        blockRow = QHBoxLayout()
-        blockRow.setSpacing(8)
-        blockRow.addWidget(blockLabel)
-        blockRow.addWidget(self.__blockSlider, stretch=1)
-        blockRow.addWidget(self.__blockValueLabel)
+        maxDispRow = QHBoxLayout()
+        maxDispRow.setSpacing(8)
+        maxDispRow.addWidget(maxDispLabel)
+        maxDispRow.addWidget(self.__maxDisparitySlider, stretch=1)
+        maxDispRow.addWidget(self.__maxDisparityValueLabel)
 
-        prefilterTypeRow = QHBoxLayout()
-        prefilterTypeRow.setSpacing(8)
-        prefilterTypeRow.addWidget(prefilterTypeLabel)
-        prefilterTypeRow.addWidget(self.__preFilterTypeSlider, stretch=1)
-        prefilterTypeRow.addWidget(self.__preFilterTypeValueLabel)
+        confidenceThresholdRow = QHBoxLayout()
+        confidenceThresholdRow.setSpacing(8)
+        confidenceThresholdRow.addWidget(confidenceThresholdLabel)
+        confidenceThresholdRow.addWidget(self.__confidenceThresholdSlider, stretch=1)
+        confidenceThresholdRow.addWidget(self.__confidenceThresholdValueLabel)
 
-        prefilterCapRow = QHBoxLayout()
-        prefilterCapRow.setSpacing(8)
-        prefilterCapRow.addWidget(prefilterCapLabel)
-        prefilterCapRow.addWidget(self.__preFilterCapSlider, stretch=1)
-        prefilterCapRow.addWidget(self.__preFilterCapValueLabel)
+        p1Row = QHBoxLayout()
+        p1Row.setSpacing(8)
+        p1Row.addWidget(p1Label)
+        p1Row.addWidget(self.__p1Slider, stretch=1)
+        p1Row.addWidget(self.__p1ValueLabel)
 
-        prefilterSizeRow = QHBoxLayout()
-        prefilterSizeRow.setSpacing(8)
-        prefilterSizeRow.addWidget(prefilterSizeLabel)
-        prefilterSizeRow.addWidget(self.__preFilterSizeSlider, stretch=1)
-        prefilterSizeRow.addWidget(self.__preFilterSizeValueLabel)
-
-        textureThresholdRow = QHBoxLayout()
-        textureThresholdRow.setSpacing(8)
-        textureThresholdRow.addWidget(textureThresholdLabel)
-        textureThresholdRow.addWidget(self.__textureThresholdSlider, stretch=1)
-        textureThresholdRow.addWidget(self.__textureThresholdValueLabel)
+        p2Row = QHBoxLayout()
+        p2Row.setSpacing(8)
+        p2Row.addWidget(p2Label)
+        p2Row.addWidget(self.__p2Slider, stretch=1)
+        p2Row.addWidget(self.__p2ValueLabel)
 
         uniquenessRatioRow = QHBoxLayout()
         uniquenessRatioRow.setSpacing(8)
         uniquenessRatioRow.addWidget(uniquenessRatioLabel)
         uniquenessRatioRow.addWidget(self.__uniquenessRatioSlider, stretch=1)
         uniquenessRatioRow.addWidget(self.__uniquenessRatioValueLabel)
+        
+        zminRow = QHBoxLayout()
+        zminRow.setSpacing(8)
+        zminRow.addWidget(ZMinLabel)
+        zminRow.addWidget(self.__ZMinSlider, stretch=1)
+        zminRow.addWidget(self.__ZMinSliderValueLabel)
 
-        speckleWindowSizeRow = QHBoxLayout()
-        speckleWindowSizeRow.setSpacing(8)
-        speckleWindowSizeRow.addWidget(speckleWindowSizeLabel)
-        speckleWindowSizeRow.addWidget(self.__speckleWindowSizeSlider, stretch=1)
-        speckleWindowSizeRow.addWidget(self.__speckleWindowSizeValueLabel)
-
-        speckleRangeRow = QHBoxLayout()
-        speckleRangeRow.setSpacing(8)
-        speckleRangeRow.addWidget(speckleRangeLabel)
-        speckleRangeRow.addWidget(self.__speckleRangeSlider, stretch=1)
-        speckleRangeRow.addWidget(self.__speckleRangeValueLabel)
-
-        disp12MaxDiffRow = QHBoxLayout()
-        disp12MaxDiffRow.setSpacing(8)
-        disp12MaxDiffRow.addWidget(disp12MaxDiffLabel)
-        disp12MaxDiffRow.addWidget(self.__disp12MaxDiffSlider, stretch=1)
-        disp12MaxDiffRow.addWidget(self.__disp12MaxDiffValueLabel)
+        zmaxRow = QHBoxLayout()
+        zmaxRow.setSpacing(8)
+        zmaxRow.addWidget(ZMaxLabel)
+        zmaxRow.addWidget(self.__ZMaxSlider, stretch=1)
+        zmaxRow.addWidget(self.__ZMaxSliderValueLabel)
 
         renderRow = QHBoxLayout()
         renderRow.setSpacing(8)
@@ -978,16 +926,14 @@ class VideoStreamingWindow(QWidget):
 
         videoControlLayout.addLayout(fpsRow)
         videoControlLayout.addLayout(qualityRow)
-        videoControlLayout.addLayout(disparitiesRow)
-        videoControlLayout.addLayout(blockRow)
-        videoControlLayout.addLayout(prefilterTypeRow)
-        videoControlLayout.addLayout(prefilterCapRow)
-        videoControlLayout.addLayout(prefilterSizeRow)
-        videoControlLayout.addLayout(textureThresholdRow)
+        videoControlLayout.addLayout(minDispRow)
+        videoControlLayout.addLayout(maxDispRow)
+        videoControlLayout.addLayout(confidenceThresholdRow)
         videoControlLayout.addLayout(uniquenessRatioRow)
-        videoControlLayout.addLayout(speckleWindowSizeRow)
-        videoControlLayout.addLayout(speckleRangeRow)
-        videoControlLayout.addLayout(disp12MaxDiffRow)
+        videoControlLayout.addLayout(p1Row)
+        videoControlLayout.addLayout(p2Row)
+        videoControlLayout.addLayout(zminRow)
+        videoControlLayout.addLayout(zmaxRow)
         videoControlLayout.addLayout(renderRow)
         viewerSettingsLayout.addWidget(videoControlCard)
 
@@ -1926,20 +1872,28 @@ class VideoStreamingWindow(QWidget):
         self.__calibProfileCombo.currentTextChanged.connect(self.__syncCalibrationProfileName)
         self.__qualitySlider.valueChanged.connect(self.__updateQualityLabel)
         self.__qualitySlider.sliderReleased.connect(self.__emitQualityChanged)
-        self.__disparitiesSlider.valueChanged.connect(self.__updateDisparitiesLabel)
-        self.__disparitiesSlider.sliderReleased.connect(self.__emitDisparitiesChanged)
-        self.__blockSlider.valueChanged.connect(self.__updateBlockLabel)
-        self.__blockSlider.sliderReleased.connect(self.__emitBlockChanged)
-        self.__preFilterTypeSlider.valueChanged.connect(self.__updatePreFilterTypeLabel)
-        self.__preFilterCapSlider.valueChanged.connect(self.__updatePreFilterCapLabel)
-        self.__preFilterSizeSlider.valueChanged.connect(self.__updatePreFilterSizeLabel)
-        self.__textureThresholdSlider.valueChanged.connect(self.__updateTextureThresholdLabel)
+        self.__maxDisparitySlider.valueChanged.connect(self.__updateMaxDisparityLabel)
+        self.__maxDisparitySlider.sliderReleased.connect(self.__emitMaxDisparitiesChanged)
+        self.__confidenceThresholdSlider.valueChanged.connect(self.__updateConfidenceThresholdLabel)
+        self.__confidenceThresholdSlider.sliderReleased.connect(self.__emitConfidenceThresholdChanged)
         self.__uniquenessRatioSlider.valueChanged.connect(self.__updateUniquenessRatioLabel)
-        self.__speckleWindowSizeSlider.valueChanged.connect(self.__updateSpeckleWindowSizeLabel)
-        self.__speckleRangeSlider.valueChanged.connect(self.__updateSpeckleRangeLabel)
-        self.__disp12MaxDiffSlider.valueChanged.connect(self.__updateDisp12MaxDiffLabel)
+        self.__uniquenessRatioSlider.sliderReleased.connect(self.__emitUniquenessRatioChanged)
+        
+        self.__ZMinSlider.valueChanged.connect(self.__updateZMinLabel)
+        self.__ZMinSlider.sliderReleased.connect(self.__emitZMinChanged)
+
+        self.__ZMaxSlider.valueChanged.connect(self.__updateZMaxLabel)
+        self.__ZMaxSlider.sliderReleased.connect(self.__emitZMaxChanged)
+        
+        self.__minDisparitySlider.valueChanged.connect(self.__updateMinDisparityLabel)
+        self.__minDisparitySlider.sliderReleased.connect(self.__emitMinDisparitiesChanged)
+        self.__p1Slider.valueChanged.connect(self.__updateP1Label)
+        self.__p1Slider.sliderReleased.connect(self.__emitP1Changed)
+        self.__p2Slider.valueChanged.connect(self.__updateP2Label)
+        self.__p2Slider.sliderReleased.connect(self.__emitP2Changed)
         
         # Default stream mode
+        self.__syncMinDisparityRange(int(self.__maxDisparitySlider.value()))
         self.__setStreamMode(self.__streamMode, emit_signal=False)
         self.__updateActiveFileLabel(self.__fileLineEdit.text())
         self.__loadCalibrationProfiles()
@@ -1968,91 +1922,111 @@ class VideoStreamingWindow(QWidget):
     def __emitQualityChanged(self) -> None:
         self.qualityChanged.emit(int(self.__qualitySlider.value()))
 
-    def __updateDisparitiesLabel(self, value: int) -> None:
-        step = 8
-        snapped = (value // step) * step
-        if snapped < self.__disparitiesSlider.minimum():
-            snapped = self.__disparitiesSlider.minimum()
+    def __updateMaxDisparityLabel(self, value: int) -> None:
+        step = 16
+        clamped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), int(value)))
+        snapped = int(round(clamped / step) * step)
+        snapped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), snapped))
         if snapped != value:
-            self.__disparitiesSlider.blockSignals(True)
-            self.__disparitiesSlider.setValue(snapped)
-            self.__disparitiesSlider.blockSignals(False)
-        self.__disparitiesValueLabel.setText(str(snapped))
+            self.__maxDisparitySlider.blockSignals(True)
+            self.__maxDisparitySlider.setValue(snapped)
+            self.__maxDisparitySlider.blockSignals(False)
+        self.__syncMinDisparityRange(snapped)
+        self.__maxDisparityValueLabel.setText(str(snapped))
 
-    def __emitDisparitiesChanged(self) -> None:
-        value = int(self.__disparitiesSlider.value())
-        step = 8
-        snapped = (value // step) * step
-        if snapped < self.__disparitiesSlider.minimum():
-            snapped = self.__disparitiesSlider.minimum()
-        self.numDisparitiesChanged.emit(snapped)
+    def __emitMaxDisparitiesChanged(self) -> None:
+        step = 16
+        value = int(self.__maxDisparitySlider.value())
+        clamped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), value))
+        snapped = int(round(clamped / step) * step)
+        snapped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), snapped))
+        self.__syncMinDisparityRange(snapped)
+        self.maxDisparitiesChanged.emit(snapped)
 
-    def __updateBlockLabel(self, value: int) -> None:
-        odd_value = value if value % 2 == 1 else value - 1
-        if odd_value < self.__blockSlider.minimum():
-            odd_value = self.__blockSlider.minimum()
-        if odd_value != value:
-            self.__blockSlider.blockSignals(True)
-            self.__blockSlider.setValue(odd_value)
-            self.__blockSlider.blockSignals(False)
-        self.__blockValueLabel.setText(str(odd_value))
+    def __updateConfidenceThresholdLabel(self, value: int) -> None:
+        self.__confidenceThresholdValueLabel.setText(str(int(value)))
 
-    def __emitBlockChanged(self) -> None:
-        value = int(self.__blockSlider.value())
-        if value % 2 == 0:
-            value -= 1
-        self.blockSizeChanged.emit(max(self.__blockSlider.minimum(), value))
-
-    def __updatePreFilterTypeLabel(self, value: int) -> None:
-        value_int = int(value)
-        if value_int < self.__preFilterTypeSlider.minimum():
-            value_int = self.__preFilterTypeSlider.minimum()
-        if value_int > self.__preFilterTypeSlider.maximum():
-            value_int = self.__preFilterTypeSlider.maximum()
-        if value_int != value:
-            self.__preFilterTypeSlider.blockSignals(True)
-            self.__preFilterTypeSlider.setValue(value_int)
-            self.__preFilterTypeSlider.blockSignals(False)
-        self.__preFilterTypeValueLabel.setText(str(value_int))
-        self.preFilterTypeChanged.emit(value_int)
-
-    def __updatePreFilterCapLabel(self, value: int) -> None:
-        self.__preFilterCapValueLabel.setText(str(int(value)))
-        self.preFilterCapChanged.emit(int(value))
-
-    def __updatePreFilterSizeLabel(self, value: int) -> None:
-        odd_value = value if value % 2 == 1 else value - 1
-        if odd_value < self.__preFilterSizeSlider.minimum():
-            odd_value = self.__preFilterSizeSlider.minimum()
-        if odd_value != value:
-            self.__preFilterSizeSlider.blockSignals(True)
-            self.__preFilterSizeSlider.setValue(odd_value)
-            self.__preFilterSizeSlider.blockSignals(False)
-        self.__preFilterSizeValueLabel.setText(str(odd_value))
-        self.preFilterSizeChanged.emit(odd_value)
-
-    def __updateTextureThresholdLabel(self, value: int) -> None:
-        self.__textureThresholdValueLabel.setText(str(int(value)))
-        self.textureThresholdChanged.emit(int(value))
+    def __emitConfidenceThresholdChanged(self) -> None:
+        self.confidenceThresholdChanged.emit(int(self.__confidenceThresholdSlider.value()))
 
     def __updateUniquenessRatioLabel(self, value: int) -> None:
-        self.__uniquenessRatioValueLabel.setText(str(int(value)))
-        self.uniquenessRatioChanged.emit(int(value))
+        self.__uniquenessRatioValueLabel.setText(f"{int(value) / 100.0:.2f}")
 
-    def __updateSpeckleWindowSizeLabel(self, value: int) -> None:
-        value_int = int(value)
-        self.__speckleWindowSizeValueLabel.setText(str(value_int))
-        self.speckleWindowSizeChanged.emit(value_int)
+    def __emitUniquenessRatioChanged(self) -> None:
+        self.uniquenessRatioChanged.emit(int(self.__uniquenessRatioSlider.value()))
 
-    def __updateSpeckleRangeLabel(self, value: int) -> None:
-        value_int = int(value)
-        self.__speckleRangeValueLabel.setText(str(value_int))
-        self.speckleRangeChanged.emit(value_int)
+    def __updateZMinLabel(self, value: int) -> None:
+        self.__ZMinSliderValueLabel.setText(f"{int(value) / 100.0:.2f}")
 
-    def __updateDisp12MaxDiffLabel(self, value: int) -> None:
+    def __emitZMinChanged(self) -> None:
+        self.zMinChanged.emit(int(self.__ZMinSlider.value()))
+
+    def __updateZMaxLabel(self, value: int) -> None:
+        self.__ZMaxSliderValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitZMaxChanged(self) -> None:
+        self.zMaxChanged.emit(int(self.__ZMaxSlider.value()))
+
+    def __updateMinDisparityLabel(self, value: int) -> None:
         value_int = int(value)
-        self.__disp12MaxDiffValueLabel.setText(str(value_int))
-        self.disparityMaxDiffChanged.emit(value_int)
+        value_int = max(self.__minDisparitySlider.minimum(), min(self.__minDisparitySlider.maximum(), value_int))
+        if value_int != value:
+            self.__minDisparitySlider.blockSignals(True)
+            self.__minDisparitySlider.setValue(value_int)
+            self.__minDisparitySlider.blockSignals(False)
+        self.__minDisparityValueLabel.setText(str(value_int))
+
+    def __emitMinDisparitiesChanged(self) -> None:
+        self.minDisparitiesChanged.emit(int(self.__minDisparitySlider.value()))
+
+    def __syncMinDisparityRange(self, max_disp: int) -> None:
+        max_disp = int(max(0, min(256, max_disp)))
+        if self.__minDisparitySlider.maximum() != max_disp:
+            self.__minDisparitySlider.setMaximum(max_disp)
+        if self.__minDisparitySlider.value() > max_disp:
+            self.__minDisparitySlider.setValue(max_disp)
+
+    def __enforceP2GreaterThanP1(self) -> None:
+        p1 = int(self.__p1Slider.value())
+        p2 = int(self.__p2Slider.value())
+        if p2 >= p1:
+            return
+        desired = p1
+        desired = max(self.__p2Slider.minimum(), min(self.__p2Slider.maximum(), desired))
+        if desired == p2:
+            return
+        self.__p2Slider.blockSignals(True)
+        self.__p2Slider.setValue(desired)
+        self.__p2Slider.blockSignals(False)
+        self.__p2ValueLabel.setText(str(int(self.__p2Slider.value())))
+
+    def __updateP1Label(self, value: int) -> None:
+        value_int = int(value)
+        value_int = max(self.__p1Slider.minimum(), min(self.__p1Slider.maximum(), value_int))
+        if value_int != value:
+            self.__p1Slider.blockSignals(True)
+            self.__p1Slider.setValue(value_int)
+            self.__p1Slider.blockSignals(False)
+        self.__p1ValueLabel.setText(str(value_int))
+        self.__enforceP2GreaterThanP1()
+
+    def __emitP1Changed(self) -> None:
+        self.__enforceP2GreaterThanP1()
+        self.p1Changed.emit(int(self.__p1Slider.value()))
+
+    def __updateP2Label(self, value: int) -> None:
+        value_int = int(value)
+        value_int = max(self.__p2Slider.minimum(), min(self.__p2Slider.maximum(), value_int))
+        if value_int != value:
+            self.__p2Slider.blockSignals(True)
+            self.__p2Slider.setValue(value_int)
+            self.__p2Slider.blockSignals(False)
+        self.__p2ValueLabel.setText(str(value_int))
+        self.__enforceP2GreaterThanP1()
+
+    def __emitP2Changed(self) -> None:
+        self.__enforceP2GreaterThanP1()
+        self.p2Changed.emit(int(self.__p2Slider.value()))
 
     def __syncFpsCombos(self, value: str) -> None:
         if not hasattr(self, "_VideoStreamingWindow__fpsCombo") or not hasattr(self, "_VideoStreamingWindow__fpsSel"):
@@ -2717,44 +2691,32 @@ class VideoStreamingWindow(QWidget):
         quality = params.get("quality")
         if isinstance(quality, int):
             self.__qualitySlider.setValue(quality)
-        num_disparities = params.get("num_disparities", params.get("disparities"))
-        if isinstance(num_disparities, int) and hasattr(self, "_VideoStreamingWindow__disparitiesSlider"):
-            self.__disparitiesSlider.setValue(num_disparities)
-        block_size = params.get("block_size", params.get("blocks"))
-        if isinstance(block_size, int) and hasattr(self, "_VideoStreamingWindow__blockSlider"):
-            self.__blockSlider.setValue(block_size)
+        max_disparity = params.get("max_disparity", params.get("maxDisparity", params.get("num_disparities", params.get("disparities"))))
+        if isinstance(max_disparity, int) and hasattr(self, "_VideoStreamingWindow__maxDisparitySlider"):
+            self.__maxDisparitySlider.setValue(max_disparity)
+            self.__syncMinDisparityRange(max_disparity)
+        min_disp = params.get("min_disparity", params.get("minDisparity"))
+        if isinstance(min_disp, int) and hasattr(self, "_VideoStreamingWindow__minDisparitySlider"):
+            self.__minDisparitySlider.setValue(min_disp)
+        p1 = params.get("p1", params.get("P1"))
+        if isinstance(p1, int) and hasattr(self, "_VideoStreamingWindow__p1Slider"):
+            self.__p1Slider.setValue(p1)
+        p2 = params.get("p2", params.get("P2"))
+        if isinstance(p2, int) and hasattr(self, "_VideoStreamingWindow__p2Slider"):
+            self.__p2Slider.setValue(p2)
 
-        pre_filter_cap = params.get("pre_filter_cap", params.get("preFilterCap"))
-        if isinstance(pre_filter_cap, int) and hasattr(self, "_VideoStreamingWindow__preFilterCapSlider"):
-            self.__preFilterCapSlider.setValue(pre_filter_cap)
+        confidence = params.get("confidence_threshold", params.get("confidenceThreshold"))
+        if isinstance(confidence, int) and hasattr(self, "_VideoStreamingWindow__confidenceThresholdSlider"):
+            self.__confidenceThresholdSlider.setValue(max(0, min(65535, confidence)))
 
-        pre_filter_type = params.get("pre_filter_type", params.get("preFilterType"))
-        if isinstance(pre_filter_type, int) and hasattr(self, "_VideoStreamingWindow__preFilterTypeSlider"):
-            self.__preFilterTypeSlider.setValue(pre_filter_type)
+        uniqueness_ratio = params.get("uniqueness_ratio", params.get("uniquenessRatio", params.get("uniqueness")))
+        if isinstance(uniqueness_ratio, (int, float)) and hasattr(self, "_VideoStreamingWindow__uniquenessRatioSlider"):
+            # VPI uniqueness is a float [0, 1]; slider is 0-100
+            if isinstance(uniqueness_ratio, float) and 0.0 <= uniqueness_ratio <= 1.0:
+                self.__uniquenessRatioSlider.setValue(int(uniqueness_ratio * 100))
+            elif isinstance(uniqueness_ratio, int):
+                self.__uniquenessRatioSlider.setValue(uniqueness_ratio)
 
-        pre_filter_size = params.get("pre_filter_size", params.get("preFilterSize"))
-        if isinstance(pre_filter_size, int) and hasattr(self, "_VideoStreamingWindow__preFilterSizeSlider"):
-            self.__preFilterSizeSlider.setValue(pre_filter_size)
-
-        texture_threshold = params.get("texture_threshold", params.get("textureThreshold"))
-        if isinstance(texture_threshold, int) and hasattr(self, "_VideoStreamingWindow__textureThresholdSlider"):
-            self.__textureThresholdSlider.setValue(texture_threshold)
-
-        uniqueness_ratio = params.get("uniqueness_ratio", params.get("uniquenessRatio"))
-        if isinstance(uniqueness_ratio, int) and hasattr(self, "_VideoStreamingWindow__uniquenessRatioSlider"):
-            self.__uniquenessRatioSlider.setValue(uniqueness_ratio)
-
-        speckle_window_size = params.get("speckle_window_size", params.get("speckleWindowSize"))
-        if isinstance(speckle_window_size, int) and hasattr(self, "_VideoStreamingWindow__speckleWindowSizeSlider"):
-            self.__speckleWindowSizeSlider.setValue(speckle_window_size)
-
-        speckle_range = params.get("speckle_range", params.get("speckleRange"))
-        if isinstance(speckle_range, int) and hasattr(self, "_VideoStreamingWindow__speckleRangeSlider"):
-            self.__speckleRangeSlider.setValue(speckle_range)
-
-        disp12_max_diff = params.get("disp12_max_diff", params.get("disp12MaxDiff"))
-        if isinstance(disp12_max_diff, int) and hasattr(self, "_VideoStreamingWindow__disp12MaxDiffSlider"):
-            self.__disp12MaxDiffSlider.setValue(disp12_max_diff)
         fps = params.get("fps")
         if isinstance(fps, int):
             self.updateFpsDisplay(str(fps))
@@ -2764,6 +2726,13 @@ class VideoStreamingWindow(QWidget):
         stereo_mono_mode = params.get("stereo_mono_mode")
         if isinstance(stereo_mono_mode, str):
             self.__setStereoMonoMode(stereo_mono_mode)
+        z_min = params.get("z_min", params.get("zMin"))
+        if isinstance(z_min, (int, float)) and hasattr(self, "_VideoStreamingWindow__ZMinSlider"):
+            self.__ZMinSlider.setValue(max(0, min(5000, int(float(z_min) * 100))))
+        z_max = params.get("z_max", params.get("zMax"))
+        if isinstance(z_max, (int, float)) and hasattr(self, "_VideoStreamingWindow__ZMaxSlider"):
+            self.__ZMaxSlider.setValue(max(0, min(5000, int(float(z_max) * 100))))
+
         render_mode = params.get("disparity_render_mode")
         if isinstance(render_mode, str) and render_mode in ("depth", "disparity"):
             self.__setDisparityRenderMode(render_mode, emit_signal=False)
@@ -2808,6 +2777,12 @@ class VideoStreamingWindow(QWidget):
         else:
             logging.warning("Unsupported frame shape for render: %s", getattr(frame, "shape", None))
             return
+
+        # QImage expects a tightly packed buffer or the correct stride (bytesPerLine).
+        # If we assume `ch*w` for a non-contiguous array, the image can appear tiled/repeated.
+        if rgbImage.dtype != np.uint8:
+            rgbImage = rgbImage.astype(np.uint8, copy=False)
+        rgbImage = np.ascontiguousarray(rgbImage)
         self.__mutex.lock()
         try:
             # ------------------------------------------------------
@@ -2818,9 +2793,11 @@ class VideoStreamingWindow(QWidget):
 
             # Convert ndarray → QImage
             h, w, ch = rgbImage.shape
-            bytesPerLine = ch * w
+            bytesPerLine = int(rgbImage.strides[0])
 
-            qImg = QImage(rgbImage.data, w, h, bytesPerLine, QImage.Format.Format_RGB888)
+            # Detach from the numpy buffer; otherwise subsequent frames can overwrite the same memory
+            # while Qt is still rendering/scaling, causing "overlaid" / corrupted output.
+            qImg = QImage(rgbImage.data, w, h, bytesPerLine, QImage.Format.Format_RGB888).copy()
             if qImg.isNull():
                 logging.info("QImage is null")
                 return

@@ -53,34 +53,30 @@ class CameraCommand(ctypes.Structure):
     ]
 
 class CamCommands(Enum):
-    CmdStartStream          = 0
-    CmdStopStream           = auto()
-    CmdSelCameraStream      = auto()
-    CmdSetFps               = auto()
-    CmdSetQuality           = auto()
-    CmdSetNumDisparities    = auto()
-    CmdSetBlockSize         = auto()
-    
-    CmdSetPreFilterType     = auto()
-    CmdSetPreFilterSize     = auto()
-    CmdSetPreFilterCap      = auto()
-    CmdSetTextureThreshold  = auto()
-    CmdSetUniquenessRatio   = auto()
-    CmdSetSpeckleWindowSize = auto()
-    CmdSetSpeckleRange      = auto()
-    CmdSetDisp12MaxDiff     = auto()
-
-    CmdRdParams             = auto()
-    CmdClrVideoRec          = auto()
-    CmdSaveVideo            = auto()
-    CmdLoadStoredVideos     = auto()
-    CmdLoadSelectedVideo    = auto()
-    CmdDeleteVideo          = auto()
-    CmdCalibrationSetState  = auto()
-    CmdCalibrationWrtParams = auto()
-    CmdCalibrationReset     = auto()
-    CmdCalibrationSave      = auto()
-    
+    # IDs pinned to host enum order in `.vscode/test2`.
+    CmdStartStream            = 0
+    CmdStopStream             = 1
+    CmdSelCameraStream        = 2
+    CmdSetFps                 = 3
+    CmdSetQuality             = 4
+    CmdSetMinDisparities      = 5
+    CmdSetMaxDisparities      = 6
+    CmdSetConfidenceThreshold = 7
+    CmdSetUniquenessRatio     = 8
+    CmdSetP1                  = 9
+    CmdSetP2                  = 10
+    CmdSetZMax                = 11
+    CmdSetZMin                = 12
+    CmdRdParams               = 13
+    CmdClrVideoRec            = 14
+    CmdSaveVideo              = 15
+    CmdLoadStoredVideos       = 16
+    CmdLoadSelectedVideo      = 17
+    CmdDeleteVideo            = 18
+    CmdCalibrationSetState    = 19
+    CmdCalibrationWrtParams   = 20
+    CmdCalibrationReset       = 21
+    CmdCalibrationSave        = 22
 
 class CamStreamSelectionModes(Enum):
     StreamCameraSource = 0

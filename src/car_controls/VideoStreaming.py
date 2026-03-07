@@ -9,6 +9,7 @@ import numpy as np
 import time
 import os
 import ctypes
+import json
 from utils import utilities
 
 from utils.utilities import Signal
@@ -177,14 +178,10 @@ class VideoStreamer:
         self.__lastRecvFrameTime: float | None = None
         self.__lastFpsTime: float | None = None
         self.__disparityRenderMode: str = "depth"
-        self.__disparityDebugLast: float = 0.0
         self.__depthDebugLast: float = 0.0
-        self.__pcDebugLast: float = 0.0
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
         self.__sendThread = None  # Create on demand
-        
-        self.__lock = Lock()
 
         # Circular buffer
         self.__frameBufferMono = CircularBuffer(100)
@@ -194,11 +191,11 @@ class VideoStreamer:
         self.__streamInBuff = CircularBuffer(100)
         self.__streamInEthBuff = CircularBuffer(100)
         self.__streamOutBuff = CircularBuffer(100)
+        
         self.__recordPath: str = ""
         self.__isRecording: bool = False
         self.__recordingMode : VideoStreamer.RecordingType = VideoStreamer.RecordingType.RecordVideo
         self.__recordWriter = None
-        self.__recordFilename: str = ""
         self.__recordSize: tuple[int, int] | None = None
         self.__recordFps: float = 30.0
         self.__recordFourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -358,6 +355,39 @@ class VideoStreamer:
         except cv2.error as exc:
             logging.error("VideoWriter write failed: %s", exc)
             self.__close_record_writer()
+
+
+    def __record_rgb_frame_with_q(self, frame_rgb: np.ndarray, q_values, tag: str = "mono") -> None:
+        if not (self.__isRecording and self.__recordPath):
+            return
+
+        if self.__recordingMode == VideoStreamer.RecordingType.RecordVideo:
+            try:
+                self.__record_frame(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR), tag)
+            except cv2.error as exc:
+                logging.error("Failed to convert RGB frame for recording: %s", exc)
+
+        try:
+            os.makedirs(self.__recordPath, exist_ok=True)
+            q_path = os.path.join(self.__recordPath, "RgbFrames_Q.json")
+
+            # Q is constant for the recording; write it once per folder.
+            if os.path.exists(q_path):
+                return
+
+            q_flat = np.asarray(q_values, dtype=np.float64).reshape(-1)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            q_data = {
+                "timestamp": timestamp,
+                "tag": tag,
+                "q": [float(v) for v in q_flat],
+            }
+
+            with open(q_path, "w", encoding="utf-8") as q_file:
+                json.dump(q_data, q_file, indent=2)
+        except Exception as exc:
+            logging.error("Failed to write RGB Q metadata: %s", exc)
             
             
     def __recordDisparity(self, mat) -> None:
@@ -420,25 +450,18 @@ class VideoStreamer:
         # Write to file
         # Append to a single file for the whole recording session.
         # The file contains repeated [PointCloudHdr][payload] chunks.
-        filename = f"PointCloud.pcl"
-        pointsList = f"PointCloud.txt"
+        filename = "PointCloud.pcl"
         try:
             os.makedirs(self.__recordPath, exist_ok=True)
         except OSError as exc:
             logging.error("Failed to create point cloud record path %s: %s", self.__recordPath, exc)
             return
         path = os.path.join(self.__recordPath, filename)
-        pathList = os.path.join(self.__recordPath, pointsList)
 
         try:
             with open(path, "ab") as f:
                 f.write(bytesOut)
-                
-            with open(pathList, "a") as fList:
-                fList.write(f"--- New Point Cloud Chunk ({time.strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
-                for point in pts_xyz:
-                    fList.write(f"X = {point[0]} Y = {point[1]} Z = {point[2]}\n")
-            logging.info("Appended point cloud chunk to %s", path)
+            logging.info("Appended point cloud chunk (%d points) to %s", len(pts_xyz), path)
         except Exception as e:
             logging.error("Failed to save point cloud to %s: %s", path, e)
 
@@ -581,7 +604,7 @@ class VideoStreamer:
 
         while True:
             while self.__streamInBuff.empty() and self.__streamInEthBuff.empty():
-                time.sleep(0.0001)
+                time.sleep(0.001)
                 continue
 
             data = self.__streamInBuff.read()
@@ -599,12 +622,13 @@ class VideoStreamer:
             frameType = frameHdr.frameHeader.frameType
             frameSide = frameHdr.frameHeader.frameSide
             
-            if frameType == VideoStreamer.FrameTypes.Mono.value:
-                ret = self.assembleMonoFrame(data, frameHdr)
-            elif frameType == VideoStreamer.FrameTypes.Stereo.value:
-                ret = self.assembleStereoFrame(data, frameHdr, frameSide)
-            elif frameType == VideoStreamer.FrameTypes.Disparity.value:
-                ret = self.assembleStereoMonoFrame(data, frameHdr)
+            # if frameType == VideoStreamer.FrameTypes.Mono.value:
+            #     ret = self.assembleMonoFrame(data, frameHdr)
+            # elif frameType == VideoStreamer.FrameTypes.Stereo.value:
+            #     ret = self.assembleStereoFrame(data, frameHdr, frameSide)
+            # elif frameType == VideoStreamer.FrameTypes.Disparity.value:
+            #     ret = self.assembleStereoMonoFrame(data, frameHdr)
+            ret = self.assembleStereoMonoFrame(data, frameHdr)
 
             if ret == VideoStreamer.Decodestatus.DecodingOK:
                 frameOkCounter += 1
@@ -934,6 +958,71 @@ class VideoStreamer:
         rows = stereoDatas.rows
         cols = stereoDatas.cols
 
+        # If it's an image payload (RGB/BGR/BGRA), push directly to display and skip depth/pointcloud.
+        # Some senders misuse `channels`/`cols` (e.g., channels=1 with cols == bytes_per_row for RGB).
+        is_u8 = depth == 0
+        elem_size = int(getattr(stereoDatas, "elemSize", 0) or 0)
+        payload_u8 = np.frombuffer(imgBytes_, dtype=np.uint8)
+        looks_like_image = is_u8 and (
+            channels in (3, 4)
+            or elem_size in (3, 4)
+            or payload_u8.size == (rows * cols * 3)
+            or payload_u8.size == (rows * cols * 4)
+            or (channels == 1 and cols > 0 and (cols % 3 == 0) and payload_u8.size == (rows * cols))
+        )
+
+        if looks_like_image:
+            # Try and decompresss. If it fails, we treat is as uncompressed frame
+            try:
+                img_decoded = cv2.imdecode(np.frombuffer(imgBytes_, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if img_decoded is not None and img_decoded.shape[0] == rows and img_decoded.shape[1] == cols:
+                    frame_rgb = cv2.cvtColor(img_decoded, cv2.COLOR_BGR2RGB)
+                    self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
+                    self.__frameBufferMono.push(frame_rgb)
+                    return True
+            except Exception as exc:
+                logging.debug("JPEG decode failed for RGB frame; falling back to raw RGB decode: %s", exc)
+
+            # If not compressed (or JPEG decode returned invalid output), expect raw RGB data.
+            if rows <= 0 or cols <= 0:
+                logging.warning("Invalid RGB frame geometry rows=%d cols=%d", rows, cols)
+                return False
+
+            raw_buf = payload_u8
+
+            # Case A: Correct metadata for packed 3-channel.
+            # Sender converts BGR/BGRA -> RGB for raw Ethernet frames, so treat this as RGB already.
+            if raw_buf.size == rows * cols * 3:
+                frame_rgb = raw_buf.reshape(rows, cols, 3)
+                self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
+                self.__frameBufferMono.push(frame_rgb)
+                return True
+
+            # Case B: Correct metadata for packed 4-channel (BGRA/RGBA). Assume BGRA from OpenCV.
+            if raw_buf.size == rows * cols * 4:
+                frame_bgra = raw_buf.reshape(rows, cols, 4)
+                frame_rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2RGB)
+                self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
+                self.__frameBufferMono.push(frame_rgb)
+                return True
+
+            # Case C: Misreported as 1-channel with cols == bytes_per_row (packed RGB bytes).
+            # This yields a "3 tiled grayscale copies" look in the UI if not corrected.
+            if channels == 1 and (cols % 3 == 0) and raw_buf.size == rows * cols:
+                pix_w = cols // 3
+                frame_rgb = raw_buf.reshape(rows, pix_w, 3)
+                self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
+                self.__frameBufferMono.push(frame_rgb)
+                return True
+
+            # Unknown raw image layout.
+            logging.warning(
+                "Unsupported raw image payload layout rows=%d cols=%d channels=%d elemSize=%d payload_bytes=%d",
+                rows, cols, channels, elem_size, int(raw_buf.size)
+            )
+            return False
+            
+
         if rows <= 0 or cols <= 0 or channels <= 0:
             logging.warning("Invalid frame geometry rows=%d cols=%d channels=%d", rows, cols, channels)
             return False
@@ -951,11 +1040,22 @@ class VideoStreamer:
         else:
             frame = buf.reshape(rows, cols, channels)
 
-        is_direct_point_cloud = (depth == 5 and channels == 3)
+        is_direct_point_cloud = (depth == 5 and (channels == 3 or channels == 6))
+        has_color = (channels == 6)
         Q = None
 
         if is_direct_point_cloud:
-            points3d = frame.astype(np.float32, copy=False)
+            points3d = np.zeros((rows, cols, 3), dtype=np.float32)
+            color3d = np.zeros((rows, cols, 3), dtype=np.float32)
+            if channels == 3:
+                points3d = frame.astype(np.float32, copy=False)
+            elif channels == 6:
+                points3dColor = frame.astype(np.float32, copy=False)
+
+                # Extract the color and the coordinates
+                points3d = points3dColor[:, :, :3]
+                color3d = points3dColor[:, :, 3:]
+
             Z = points3d[:, :, 2]
             display_source = Z
             mode_name = "pc32f"
@@ -983,61 +1083,16 @@ class VideoStreamer:
             mode_name = "disparity"
             base_valid = (disp32f > 0) & np.isfinite(Z)
 
-        dist = np.linalg.norm(points3d, axis=2)
-
-        now = time.time()
-        if now - self.__depthDebugLast >= 2.0:
-            finite_mask = np.isfinite(Z)
-            if np.any(finite_mask):
-                z_min_dbg = float(np.min(Z[finite_mask]))
-                z_max_dbg = float(np.max(Z[finite_mask]))
-            else:
-                z_min_dbg = float("nan")
-                z_max_dbg = float("nan")
-
-            finite_dist_mask = np.isfinite(dist)
-            if np.any(finite_dist_mask):
-                d_min_dbg = float(np.min(dist[finite_dist_mask]))
-                d_max_dbg = float(np.max(dist[finite_dist_mask]))
-            else:
-                d_min_dbg = float("nan")
-                d_max_dbg = float("nan")
-
-            h, w = Z.shape[:2]
-            sample_points = {
-                "center": (h // 2, w // 2),
-                "tl": (0, 0),
-                "tr": (0, w - 1),
-                "bl": (h - 1, 0),
-                "br": (h - 1, w - 1),
-            }
-            sample_str = ", ".join(
-                f"{name}={float(Z[y, x]):.3f}" for name, (y, x) in sample_points.items()
-            )
-
-            if Q is not None:
-                q32 = Q.astype(np.float32, copy=False)
-                q32_3_2 = float(q32[3, 2]) if q32.shape == (4, 4) else float("nan")
-                baseline_est = (-1.0 / q32_3_2) if q32_3_2 not in (0.0, -0.0) else float("nan")
-                logging.debug(
-                    "Depth debug[%s]: src=%s %s Zmin=%.3f Zmax=%.3f Dmin=%.3f Dmax=%.3f baseline~%.3f Q[3,2]=%.6f | %s"
-                    % (mode_name, display_source.dtype, display_source.shape, z_min_dbg, z_max_dbg, d_min_dbg, d_max_dbg, baseline_est, q32_3_2, sample_str)
-                )
-                logging.debug(f"Q=\n{q32}")
-            else:
-                logging.debug(
-                    "Depth debug[%s]: src=%s %s Zmin=%.3f Zmax=%.3f Dmin=%.3f Dmax=%.3f | %s"
-                    % (mode_name, display_source.dtype, display_source.shape, z_min_dbg, z_max_dbg, d_min_dbg, d_max_dbg, sample_str)
-                )
-            self.__depthDebugLast = now
-
-        mask = base_valid
+        # base_valid already incorporates np.isfinite(Z), so no need to re-check.
+        valid = base_valid
 
         z_min_abs, z_max_abs = 0.2, 30.0
-        valid = mask & np.isfinite(Z)
-        if np.any(valid):
-            z_lo = float(np.percentile(Z[valid], 5))
-            z_hi = float(np.percentile(Z[valid], 95))
+        Z_valid_flat = Z[valid]
+        if Z_valid_flat.size > 0:
+            # Subsample for percentile: statistically equivalent for display, ~8x faster.
+            Z_sample = Z_valid_flat[::8] if Z_valid_flat.size > 8 else Z_valid_flat
+            z_lo = float(np.percentile(Z_sample, 5))
+            z_hi = float(np.percentile(Z_sample, 95))
             if not np.isfinite(z_lo) or not np.isfinite(z_hi) or z_hi <= z_lo:
                 z_lo, z_hi = z_min_abs, z_max_abs
         else:
@@ -1046,16 +1101,15 @@ class VideoStreamer:
         z_lo = max(z_min_abs, min(z_lo, z_max_abs))
         z_hi = max(z_lo + 1e-6, min(z_hi, z_max_abs))
 
-        Z_vis = Z.copy()
-        Z_vis[~valid] = np.nan
-        Z_vis = np.clip(Z_vis, z_lo, z_hi)
-
-        Z_scaled = 255.0 * (z_hi - Z_vis) / (z_hi - z_lo)
-        Z_scaled = np.nan_to_num(Z_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-        Z_norm = np.clip(Z_scaled, 0.0, 255.0).astype(np.uint8)
+        # Build Z_norm without nan intermediates: only operate on valid pixels,
+        # leaving invalid pixels as 0. This avoids 3 full-array temporaries.
+        Z_norm = np.zeros(Z.shape, dtype=np.uint8)
+        if Z_valid_flat.size > 0:
+            Z_v = np.clip(Z_valid_flat, z_lo, z_hi)
+            Z_norm[valid] = np.clip(255.0 * (z_hi - Z_v) / (z_hi - z_lo), 0.0, 255.0).astype(np.uint8)
 
         Z_color = cv2.applyColorMap(Z_norm, cv2.COLORMAP_TURBO)
-        Z_color[~mask] = (0, 0, 0)
+        Z_color[~valid] = (0, 0, 0)
         Z_color = cv2.cvtColor(Z_color, cv2.COLOR_BGR2RGB)
 
         display_frame = Z_color if self.__disparityRenderMode == "depth" else display_source
@@ -1093,14 +1147,15 @@ class VideoStreamer:
                 #     self.__recordDisparity(frame)
 
         if self.__renderer is not None:
+            # points3d = _points3d
             x = points3d[:, :, 0]
             y = points3d[:, :, 1]
             finite_xyz = np.isfinite(x) & np.isfinite(y) & np.isfinite(Z)
             pc_mask = (
                 base_valid
                 & finite_xyz
-                & (Z > 0.6)
-                # & (Z < 20.0)
+                & (Z > 0.01)
+                & (Z < 5.0)
                 # & (dist < 25.0)
                 & (np.abs(x) < 12.0)
                 & (np.abs(y) < 8.0)
@@ -1112,17 +1167,35 @@ class VideoStreamer:
 
             pts_xyz = pts_xyz.astype(np.float32, copy=False)
             pts_xyz = np.ascontiguousarray(pts_xyz)
+
+            # Extract matching color data if available
+            pts_rgb = None
+            if has_color:
+                pts_rgb = color3d[pc_mask]
+
             n_points = int(pts_xyz.shape[0])
 
             max_points = 200_000
             if n_points > max_points:
                 step = max(1, n_points // max_points)
                 pts_xyz = pts_xyz[::step]
+                if pts_rgb is not None:
+                    pts_rgb = pts_rgb[::step]
                 n_points = int(pts_xyz.shape[0])
 
             if n_points > 0:
                 pc_bytes = pts_xyz.view(np.uint8)
-                self.__renderer.setPointCloudData(pc_bytes, n_points)
+                if pts_rgb is not None:
+                    # Convert float32 RGB (0-255) to uint32 to match C++ PointRGB struct
+                    pts_rgb = np.clip(pts_rgb, 0, 255).astype(np.uint32)
+                    pts_rgb = np.ascontiguousarray(pts_rgb)
+                    rgb_bytes = pts_rgb.view(np.uint8)
+                    self.__renderer.setPointCloudColorData(pc_bytes, rgb_bytes, n_points)
+                else:
+                    self.__renderer.setPointCloudData(pc_bytes, n_points)
+            else:
+                # If no point cloud frames received in over a period of time  
+                pass
 
         self.__frameBufferStereoMono.push((display_frame, (stereoDatas.gyroX, stereoDatas.gyroY, stereoDatas.gyroZ)))
         return True

@@ -121,6 +121,7 @@ class BackendIface(QThread):
         self.__mac_cache : dict = {}
         self.__streamQuality: int = 75
         self.__streamFps: int = 30
+        self.__maxDisparityCurrent: int = 64
 
         # Connect signals
         # Forward discovered host IPs to the UI with the IP string
@@ -754,168 +755,137 @@ class BackendIface(QThread):
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
 
 
-    def setNumDisparities(self, value: int) -> None:
-        """Set the number of disparities on the camera (must be multiple of 8)."""
-        step = 8
-        value = (value // step) * step
-        if value <= 0:
-            return
-        logging.info("Setting num disparities to %d", value)
+    def setMaxDisparities(self, value: int) -> None:
+        """Set the maximum disparity for matching search (VPI: maxDisparity)."""
+        step = 16
+        value = int(value)
+        if value < 16:
+            value = 16
+        if value > 256:
+            value = 256
+        value = int(round(value / step) * step)
+        value = max(16, min(256, value))
+        self.__maxDisparityCurrent = value
+        logging.info("Setting max disparity to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetNumDisparities.value
+        cam_cmd.command = CamCommands.CmdSetMaxDisparities.value
         cam_cmd.data.u16 = value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue num disparities command: %s", exc)
+            logging.error("Failed to enqueue max disparity command: %s", exc)
 
 
-    def setBlockSize(self, value: int) -> None:
-        """Set the block size on the camera (must be odd, typically >= 5)."""
-        if value % 2 == 0:
-            value -= 1
-        if value < 5:
-            value = 5
-        if value <= 0:
-            return
-        logging.info("Setting block size to %d", value)
+    def setConfidenceThreshold(self, value: int) -> None:
+        """Set VPI confidence threshold (0-65535, default 32767)."""
+        value = int(value)
+        value = max(0, min(65535, value))
+        logging.info("Setting confidence threshold to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetBlockSize.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetConfidenceThreshold.value
+        cam_cmd.data.u16 = value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue block size command: %s", exc)
-            
-            
-    def setTextureThreshold(self, value: int) -> None:
-        """Set the texture threshold on the camera."""
-        if value < 0:
-            value = 0
-        logging.info("Setting texture threshold to %d", value)
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetTextureThreshold.value
-        cam_cmd.data.u8 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
-        except Exception as exc:
-            logging.error("Failed to enqueue texture threshold command: %s", exc)
-            
-            
+            logging.error("Failed to enqueue confidence threshold command: %s", exc)
+
+
     def setUniquenessRatio(self, value: int) -> None:
-        """Set the uniqueness ratio on the camera."""
-        if value < 0:
-            value = 0
-        logging.info("Setting uniqueness ratio to %d", value)
+        """Set the VPI uniqueness ratio on the camera (slider 0-100 → float 0.0-1.0)."""
+        value = int(value)
+        value = max(0, min(100, value))
+        fval = value / 100.0
+        logging.info("Setting uniqueness ratio to %.2f", fval)
         cam_cmd = CameraCommand()
         cam_cmd.command = CamCommands.CmdSetUniquenessRatio.value
-        cam_cmd.data.u8 = value
+        cam_cmd.data.f32 = fval
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
             logging.error("Failed to enqueue uniqueness ratio command: %s", exc)
-            
-            
-    def setPrefilterType(self, value: int) -> None:
-        """Set the prefilter type on the camera."""
-        if value < 0:
-            value = 0
-        logging.info("Setting prefilter type to %d", value)
+
+
+    def setMinDisparities(self, value: int) -> None:
+        """Set minimum disparity (VPI: minDisparity, 0 to maxDisparity)."""
+        value = int(value)
+        max_disp = max(0, int(self.__maxDisparityCurrent))
+        value = max(0, min(max_disp, value))
+        logging.info("Setting min disparity to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetPreFilterType.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetMinDisparities.value
+        cam_cmd.data.i = value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue prefilter type command: %s", exc)
-            
-            
-    def setPrefilterCap(self, value: int) -> None:
-        """Set the prefilter cap on the camera."""
-        if value < 1:
-            value = 1
-        logging.info("Setting prefilter cap to %d", value)
+            logging.error("Failed to enqueue min disparity command: %s", exc)
+
+
+    @pyqtSlot(int)
+    def setP1(self, value: int) -> None:
+        """Set SGBM P1 penalty."""
+        value = int(value)
+        value = max(1, min(255, value))
+        logging.info("Setting P1 to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetPreFilterCap.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetP1.value
+        cam_cmd.data.u16 = value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue prefilter cap command: %s", exc)
-            
-            
-    def setPrefilterSize(self, value: int) -> None:
-        """Set the prefilter size on the camera (must be odd)."""
-        if value % 2 == 0:
-            value -= 1
-        if value < 5:
-            value = 5
-        logging.info("Setting prefilter size to %d", value)
+            logging.error("Failed to enqueue P1 command: %s", exc)
+
+
+    @pyqtSlot(int)
+    def setP2(self, value: int) -> None:
+        """Set SGBM P2 penalty (must be > P1, enforced on device too)."""
+        value = int(value)
+        value = max(1, min(255, value))
+        logging.info("Setting P2 to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetPreFilterSize.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetP2.value
+        cam_cmd.data.u16 = value
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue prefilter size command: %s", exc)
+            logging.error("Failed to enqueue P2 command: %s", exc)
 
 
-    def setSpeckleWindowSize(self, value: int) -> None:
-        """Set speckle window size on the camera."""
-        if value < 0:
-            value = 0
-        if value > 255:
-            value = 255
-        logging.info("Setting speckle window size to %d", value)
+    @pyqtSlot(int)
+    def setZMax(self, value: int) -> None:
+        """Set maximum distance to be displayed (slider int 0-5000 → float 0.00-50.00)."""
+        fval = int(value) / 100.0
+        fval = max(0.0, min(50.0, fval))
+        logging.info("Setting Z Max to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetSpeckleWindowSize.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetZMax.value
+        cam_cmd.data.f32 = fval
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue speckle window size command: %s", exc)
+            logging.error("Failed to enqueue Z Max command: %s", exc)
 
 
-    def setSpeckleRange(self, value: int) -> None:
-        """Set speckle range on the camera."""
-        if value < 0:
-            value = 0
-        if value > 255:
-            value = 255
-        logging.info("Setting speckle range to %d", value)
+    @pyqtSlot(int)
+    def setZMin(self, value: int) -> None:
+        """Set minimum distance to be displayed (slider int 0-5000 → float 0.00-50.00)."""
+        fval = int(value) / 100.0
+        fval = max(0.0, min(50.0, fval))
+        logging.info("Setting Z Min to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetSpeckleRange.value
-        cam_cmd.data.u8 = value
+        cam_cmd.command = CamCommands.CmdSetZMin.value
+        cam_cmd.data.f32 = fval
         cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
             self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
         except Exception as exc:
-            logging.error("Failed to enqueue speckle range command: %s", exc)
-
-
-    def setDisp12MaxDiff(self, value: int) -> None:
-        """Set disp12 max diff on the camera."""
-        if value < 0:
-            value = 0
-        if value > 255:
-            value = 255
-        logging.info("Setting disp12 max diff to %d", value)
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetDisp12MaxDiff.value
-        cam_cmd.data.u8 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
-        except Exception as exc:
-            logging.error("Failed to enqueue disp12 max diff command: %s", exc)
+            logging.error("Failed to enqueue Z Min command: %s", exc)
 
     
     def __loadStoredVideoList(self) -> None:
@@ -1031,4 +1001,4 @@ class BackendIface(QThread):
                 tlm = self.__tlmBuffer.read()
                 self.telemetryReceived.emit(tlm)
                 
-            self.usleep(100)
+            self.usleep(5000)
