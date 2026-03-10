@@ -887,7 +887,54 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue Z Min command: %s", exc)
 
-    
+
+    @pyqtSlot(int)
+    def setDepthThreshold(self, value: int) -> None:
+        """Set depth threshold (slider int 0-1000 → float 0.00-10.00)."""
+        fval = int(value) / 100.0
+        fval = max(0.0, min(10.0, fval))
+        logging.info("Setting depth threshold to %.2f", fval)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetDepthThreshold.value
+        cam_cmd.data.f32 = fval
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue depth threshold command: %s", exc)
+
+
+    @pyqtSlot(int)
+    def setMinAgreeingPixels(self, value: int) -> None:
+        """Set minimum number of agreeing pixels."""
+        value = max(0, min(50, int(value)))
+        logging.info("Setting min agreeing pixels to %d", value)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetMinAgreeingPixels.value
+        cam_cmd.data.i = value
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue min agreeing pixels command: %s", exc)
+
+
+    @pyqtSlot(int)
+    def setColorThreshold(self, value: int) -> None:
+        """Set color threshold (slider int 0-1000 → float 0.00-10.00)."""
+        fval = int(value) / 100.0
+        fval = max(0.0, min(10.0, fval))
+        logging.info("Setting color threshold to %.2f", fval)
+        cam_cmd = CameraCommand()
+        cam_cmd.command = CamCommands.CmdSetColorThreshold.value
+        cam_cmd.data.f32 = fval
+        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
+        try:
+            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+        except Exception as exc:
+            logging.error("Failed to enqueue color threshold command: %s", exc)
+
+
     def __loadStoredVideoList(self) -> None:
         """Load the list of stored videos from the device."""
         # Build nested CameraCommand payload

@@ -67,16 +67,19 @@ class CamCommands(Enum):
     CmdSetP2                  = 10
     CmdSetZMax                = 11
     CmdSetZMin                = 12
-    CmdRdParams               = 13
-    CmdClrVideoRec            = 14
-    CmdSaveVideo              = 15
-    CmdLoadStoredVideos       = 16
-    CmdLoadSelectedVideo      = 17
-    CmdDeleteVideo            = 18
-    CmdCalibrationSetState    = 19
-    CmdCalibrationWrtParams   = 20
-    CmdCalibrationReset       = 21
-    CmdCalibrationSave        = 22
+    CmdSetDepthThreshold      = 13
+    CmdSetMinAgreeingPixels   = 14
+    CmdSetColorThreshold      = 15
+    CmdRdParams               = 16
+    CmdClrVideoRec            = 17
+    CmdSaveVideo              = 18
+    CmdLoadStoredVideos       = 19
+    CmdLoadSelectedVideo      = 20
+    CmdDeleteVideo            = 21
+    CmdCalibrationSetState    = 22
+    CmdCalibrationWrtParams   = 23
+    CmdCalibrationReset       = 24
+    CmdCalibrationSave        = 25
 
 class CamStreamSelectionModes(Enum):
     StreamCameraSource = 0

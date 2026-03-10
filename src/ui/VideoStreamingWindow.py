@@ -385,7 +385,10 @@ class VideoStreamingWindow(QWidget):
     uniquenessRatioChanged          = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
     zMaxChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
     zMinChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
-    
+    depthThresholdChanged           = pyqtSignal(int)              # Emitted when depth threshold slider is released
+    minAgreeingPixelsChanged        = pyqtSignal(int)              # Emitted when min agreeing pixels slider is released
+    colorThresholdChanged           = pyqtSignal(int)              # Emitted when color threshold slider is released
+
     uploadVideoClicked              = pyqtSignal(str)              # File selected signal
     deviceVideoLoadRequested        = pyqtSignal(str)              # Device video selection signal
     deviceVideoDeleteRequested      = pyqtSignal(str)              # Device video deletion signal
@@ -770,6 +773,39 @@ class VideoStreamingWindow(QWidget):
         self.__ZMaxSliderValueLabel = QLabel(f"{self.__ZMaxSlider.value() / 100.0:.2f}")
         self.__ZMaxSliderValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
+        depthThresholdLabel = QLabel("Depth Thresh")
+        depthThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__depthThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__depthThresholdSlider.setRange(0, 1000)
+        self.__depthThresholdSlider.setValue(0)
+        self.__depthThresholdSlider.setSingleStep(1)
+        self.__depthThresholdSlider.setPageStep(50)
+        self.__depthThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__depthThresholdValueLabel = QLabel(f"{self.__depthThresholdSlider.value() / 100.0:.2f}")
+        self.__depthThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        minAgreeingPixelsLabel = QLabel("Min Agree Px")
+        minAgreeingPixelsLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__minAgreeingPixelsSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__minAgreeingPixelsSlider.setRange(0, 50)
+        self.__minAgreeingPixelsSlider.setValue(1)
+        self.__minAgreeingPixelsSlider.setSingleStep(1)
+        self.__minAgreeingPixelsSlider.setPageStep(5)
+        self.__minAgreeingPixelsSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__minAgreeingPixelsValueLabel = QLabel(str(self.__minAgreeingPixelsSlider.value()))
+        self.__minAgreeingPixelsValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        colorThresholdLabel = QLabel("Color Thresh")
+        colorThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__colorThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__colorThresholdSlider.setRange(0, 1000)
+        self.__colorThresholdSlider.setValue(0)
+        self.__colorThresholdSlider.setSingleStep(1)
+        self.__colorThresholdSlider.setPageStep(50)
+        self.__colorThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__colorThresholdValueLabel = QLabel(f"{self.__colorThresholdSlider.value() / 100.0:.2f}")
+        self.__colorThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
         renderLabel = QLabel("RGB Depth")
         renderLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
         self.__disparityRenderButtons: dict[str, QPushButton] = {}
@@ -829,6 +865,12 @@ class VideoStreamingWindow(QWidget):
             self.__ZMinSliderValueLabel,
             ZMaxLabel,
             self.__ZMaxSliderValueLabel,
+            depthThresholdLabel,
+            self.__depthThresholdValueLabel,
+            minAgreeingPixelsLabel,
+            self.__minAgreeingPixelsValueLabel,
+            colorThresholdLabel,
+            self.__colorThresholdValueLabel,
             renderLabel,
         ):
             widget.setFixedHeight(18)
@@ -842,6 +884,9 @@ class VideoStreamingWindow(QWidget):
             self.__uniquenessRatioSlider,
             self.__ZMinSlider,
             self.__ZMaxSlider,
+            self.__depthThresholdSlider,
+            self.__minAgreeingPixelsSlider,
+            self.__colorThresholdSlider,
         ):
             slider.setFixedHeight(18)
         for value_label in (
@@ -854,6 +899,9 @@ class VideoStreamingWindow(QWidget):
             self.__uniquenessRatioValueLabel,
             self.__ZMinSliderValueLabel,
             self.__ZMaxSliderValueLabel,
+            self.__depthThresholdValueLabel,
+            self.__minAgreeingPixelsValueLabel,
+            self.__colorThresholdValueLabel,
         ):
             value_label.setFixedWidth(48)
 
@@ -917,6 +965,24 @@ class VideoStreamingWindow(QWidget):
         zmaxRow.addWidget(self.__ZMaxSlider, stretch=1)
         zmaxRow.addWidget(self.__ZMaxSliderValueLabel)
 
+        depthThresholdRow = QHBoxLayout()
+        depthThresholdRow.setSpacing(8)
+        depthThresholdRow.addWidget(depthThresholdLabel)
+        depthThresholdRow.addWidget(self.__depthThresholdSlider, stretch=1)
+        depthThresholdRow.addWidget(self.__depthThresholdValueLabel)
+
+        minAgreeingPixelsRow = QHBoxLayout()
+        minAgreeingPixelsRow.setSpacing(8)
+        minAgreeingPixelsRow.addWidget(minAgreeingPixelsLabel)
+        minAgreeingPixelsRow.addWidget(self.__minAgreeingPixelsSlider, stretch=1)
+        minAgreeingPixelsRow.addWidget(self.__minAgreeingPixelsValueLabel)
+
+        colorThresholdRow = QHBoxLayout()
+        colorThresholdRow.setSpacing(8)
+        colorThresholdRow.addWidget(colorThresholdLabel)
+        colorThresholdRow.addWidget(self.__colorThresholdSlider, stretch=1)
+        colorThresholdRow.addWidget(self.__colorThresholdValueLabel)
+
         renderRow = QHBoxLayout()
         renderRow.setSpacing(8)
         renderRow.addWidget(renderLabel)
@@ -934,6 +1000,9 @@ class VideoStreamingWindow(QWidget):
         videoControlLayout.addLayout(p2Row)
         videoControlLayout.addLayout(zminRow)
         videoControlLayout.addLayout(zmaxRow)
+        videoControlLayout.addLayout(depthThresholdRow)
+        videoControlLayout.addLayout(minAgreeingPixelsRow)
+        videoControlLayout.addLayout(colorThresholdRow)
         videoControlLayout.addLayout(renderRow)
         viewerSettingsLayout.addWidget(videoControlCard)
 
@@ -1884,7 +1953,16 @@ class VideoStreamingWindow(QWidget):
 
         self.__ZMaxSlider.valueChanged.connect(self.__updateZMaxLabel)
         self.__ZMaxSlider.sliderReleased.connect(self.__emitZMaxChanged)
-        
+
+        self.__depthThresholdSlider.valueChanged.connect(self.__updateDepthThresholdLabel)
+        self.__depthThresholdSlider.sliderReleased.connect(self.__emitDepthThresholdChanged)
+
+        self.__minAgreeingPixelsSlider.valueChanged.connect(self.__updateMinAgreeingPixelsLabel)
+        self.__minAgreeingPixelsSlider.sliderReleased.connect(self.__emitMinAgreeingPixelsChanged)
+
+        self.__colorThresholdSlider.valueChanged.connect(self.__updateColorThresholdLabel)
+        self.__colorThresholdSlider.sliderReleased.connect(self.__emitColorThresholdChanged)
+
         self.__minDisparitySlider.valueChanged.connect(self.__updateMinDisparityLabel)
         self.__minDisparitySlider.sliderReleased.connect(self.__emitMinDisparitiesChanged)
         self.__p1Slider.valueChanged.connect(self.__updateP1Label)
@@ -1966,6 +2044,24 @@ class VideoStreamingWindow(QWidget):
 
     def __emitZMaxChanged(self) -> None:
         self.zMaxChanged.emit(int(self.__ZMaxSlider.value()))
+
+    def __updateDepthThresholdLabel(self, value: int) -> None:
+        self.__depthThresholdValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitDepthThresholdChanged(self) -> None:
+        self.depthThresholdChanged.emit(int(self.__depthThresholdSlider.value()))
+
+    def __updateMinAgreeingPixelsLabel(self, value: int) -> None:
+        self.__minAgreeingPixelsValueLabel.setText(str(int(value)))
+
+    def __emitMinAgreeingPixelsChanged(self) -> None:
+        self.minAgreeingPixelsChanged.emit(int(self.__minAgreeingPixelsSlider.value()))
+
+    def __updateColorThresholdLabel(self, value: int) -> None:
+        self.__colorThresholdValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitColorThresholdChanged(self) -> None:
+        self.colorThresholdChanged.emit(int(self.__colorThresholdSlider.value()))
 
     def __updateMinDisparityLabel(self, value: int) -> None:
         value_int = int(value)
@@ -2732,6 +2828,18 @@ class VideoStreamingWindow(QWidget):
         z_max = params.get("z_max", params.get("zMax"))
         if isinstance(z_max, (int, float)) and hasattr(self, "_VideoStreamingWindow__ZMaxSlider"):
             self.__ZMaxSlider.setValue(max(0, min(5000, int(float(z_max) * 100))))
+
+        depth_threshold = params.get("depth_threshold", params.get("depthThreshold"))
+        if isinstance(depth_threshold, (int, float)) and hasattr(self, "_VideoStreamingWindow__depthThresholdSlider"):
+            self.__depthThresholdSlider.setValue(max(0, min(1000, int(float(depth_threshold) * 100))))
+
+        min_agreeing_pixels = params.get("min_agreeing_pixels", params.get("minAgreeingPixels"))
+        if isinstance(min_agreeing_pixels, int) and hasattr(self, "_VideoStreamingWindow__minAgreeingPixelsSlider"):
+            self.__minAgreeingPixelsSlider.setValue(max(0, min(50, min_agreeing_pixels)))
+
+        color_threshold = params.get("color_threshold", params.get("colorThreshold"))
+        if isinstance(color_threshold, (int, float)) and hasattr(self, "_VideoStreamingWindow__colorThresholdSlider"):
+            self.__colorThresholdSlider.setValue(max(0, min(1000, int(float(color_threshold) * 100))))
 
         render_mode = params.get("disparity_render_mode")
         if isinstance(render_mode, str) and render_mode in ("depth", "disparity"):

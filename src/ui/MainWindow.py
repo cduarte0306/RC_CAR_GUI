@@ -958,6 +958,9 @@ class MainWindow(QMainWindow):
         self.__streamWindow.uniquenessRatioChanged.connect(self.__consumer.setUniquenessRatio)
         self.__streamWindow.zMaxChanged.connect(self.__consumer.setZMax)
         self.__streamWindow.zMinChanged.connect(self.__consumer.setZMin)
+        self.__streamWindow.depthThresholdChanged.connect(self.__consumer.setDepthThreshold)
+        self.__streamWindow.minAgreeingPixelsChanged.connect(self.__consumer.setMinAgreeingPixels)
+        self.__streamWindow.colorThresholdChanged.connect(self.__consumer.setColorThreshold)
 
         self.__streamWindow.streamOutRequested.connect(self.__consumer.startVideoStream)
         self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
