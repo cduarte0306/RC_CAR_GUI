@@ -2,3 +2,5 @@ pydualsense
 zeroconf
 opencv-python
 PyQt6
+pybind11
+psutil

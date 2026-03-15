@@ -20,7 +20,7 @@ class UDP:
 
         # Try to increase the OS receive buffer to reduce chance of ENOBUFS/10040
         try:
-            desired_buf = 262144  # 256 KiB
+            desired_buf = 1280 * 720 *4 * 3  # 256 KiB
             self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, desired_buf)
             logging.info("Set UDP socket SO_RCVBUF to %d", desired_buf)
         except Exception:
@@ -59,7 +59,7 @@ class UDP:
         self.__server_ip = ip
 
 
-    def bindSocket(self, port) -> bool:
+    def bindSocket(self, port, ip : str = "0.0.0.0") -> bool:
         """
         Bind the socket
 
@@ -70,7 +70,7 @@ class UDP:
         Returns:
             bool: _description_
         """
-        self.__socket.bind(("0.0.0.0", self.__port))
+        self.__socket.bind((ip, port))
 
 
     def set_timeout(self, timeout: float) -> None:

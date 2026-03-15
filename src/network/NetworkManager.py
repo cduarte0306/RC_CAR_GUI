@@ -68,16 +68,28 @@ class NetworkManager:
         Returns:
             bool: _description_
         """
-        port, ip = port
+        portNum = 0
+        ipHost = ""
+        ipLocal = ""
+        
+        if len(port) == 2:
+            portNum, ipHost = port
+        elif len(port) == 3:
+            portNum, ipHost, ipLocal = port
+        
         # Create the underlying UDP adapter
-        udp_adapter = UDP(port, ip)
+        udp_adapter = UDP(portNum, ipHost)
 
         # If no remote IP was provided, this adapter is intended for receiving
         # so bind it to the local port so recvfrom() will receive packets.
         try:
-            if not ip:
-                udp_adapter.bindSocket(port)
-                logging.info("Bound UDP adapter '%s' to port %s for receiving", name, port)
+            # if not ip:
+            if not ipLocal:
+                udp_adapter.bindSocket(portNum)
+            else:
+                udp_adapter.bindSocket(portNum, ipLocal)
+            logging.info("Bound UDP adapter '%s' to port %s for receiving", name, portNum)
+
         except Exception as e:
             logging.error("Failed to bind UDP adapter '%s': %s", name, e)
 
@@ -87,6 +99,7 @@ class NetworkManager:
         # If a callback was provided, connect the Socket signal to it
         if recvCallback is not None:
             socket_wrapper.dataReceived.connect(recvCallback)
+            socket_wrapper.dataReceived.setName(f"{name}_dataReceived")
 
         self.__socketPool[name] = socket_wrapper
 

@@ -12,6 +12,37 @@
             "cwd": "${workspaceFolder}/src",
             "justMyCode": false,
             "subProcess": true
+        },
+        {
+            "name": "Run setup_cpp.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/setup_cpp.py",
+            "console": "integratedTerminal",
+            "args": [
+				"build",
+				"--cuda",
+                "--force-open3d-noconfig"
+			],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "subProcess": true
+        },
+        {
+            "name": "Debug C++ App (rc_car_app)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/rc_car_app.exe",
+            "args": ["C:\\Users\\cayod\\Videos\\RC Car\\recording_20260217_224102\\PointCloud.pcl"],
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${workspaceFolder}/build/msvc_19.33_cxx17_64_md_release;${env:PATH}"
+                }
+            ],
+            "preLaunchTask": "Build C++ App (Debug)",
+            "console": "integratedTerminal"
         }
     ]
 }

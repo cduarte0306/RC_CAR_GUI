@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import QApplication
 
 def init_logger() -> configparser.ConfigParser:
     parser = configparser.ConfigParser()
-    parser.read("config/rc-car-viewer-config.ini")
+    config_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "rc-car-viewer-config.ini"))
+    parser.read(config_path)
 
     # Get the directory where run.py is located
     base_dir = os.path.dirname(os.path.abspath(__file__))

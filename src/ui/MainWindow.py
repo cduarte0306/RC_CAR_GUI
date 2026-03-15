@@ -5,16 +5,16 @@ from PyQt6.QtCore import (
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QGraphicsOpacityEffect,
     QLabel, QFrame, QGraphicsBlurEffect, QHBoxLayout, QFileDialog, QMessageBox, QGridLayout,
-    QSizePolicy, QToolTip
+    QSizePolicy, QToolTip, QToolButton, QMenu
 )
-from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen, QCursor
+from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor, QPen, QCursor, QAction
 
 from ui.TelemetryWindow import VehicleTelemetryWindow
 from ui.VideoStreamingWindow import VideoStreamingWindow
-from ui.VisualizationWindow import VisualizationWindow
 from ui.UIConsumer import BackendIface
 from ui.FirmwareUpdateWindow import FirmwareUpdateWindow
 from ui.theme import make_card
+from network.interfaces import list_ipv4_interfaces, NetworkInterfaceOption
 import logging
 
 
@@ -69,7 +69,6 @@ class SidePanel(QFrame):
     showWelcome     = pyqtSignal()  # Show welcome
     showTlm         = pyqtSignal()  # Show telemetry signal
     showVideoStream = pyqtSignal()  # Show video stream
-    showVisualizer  = pyqtSignal()  # Show 3D visualizer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -127,10 +126,6 @@ class SidePanel(QFrame):
         self.btnVideo.setToolTip("Open video stream")
         self.btnVideo.setIcon(QIcon("icons/video.svg"))
 
-        self.btn3d = GlowButton(" 3D View")
-        self.btn3d.setToolTip("Open 3D visualization")
-        self.btn3d.setIcon(QIcon("icons/rc-car.png"))
-
         self.btnFw    = GlowButton(" Firmware")
         self.btnFw.setIcon(QIcon("icons/upgrade.svg"))
         self.btnFw.setToolTip("Upload Firmware")
@@ -143,7 +138,6 @@ class SidePanel(QFrame):
         layout.addWidget(self.btnWelcome)
         layout.addWidget(self.btnTelem)
         layout.addWidget(self.btnVideo)
-        layout.addWidget(self.btn3d)
         layout.addWidget(self.btnFw)
         layout.addWidget(self.btnGPS)
 
@@ -191,7 +185,6 @@ class SidePanel(QFrame):
         self.btnWelcome.clicked.connect(lambda: self.showWelcome.emit())
         self.btnTelem.clicked.connect(lambda: self.showTlm.emit())
         self.btnVideo.clicked.connect(lambda: self.showVideoStream.emit())
-        self.btn3d.clicked.connect(lambda: self.showVisualizer.emit())
 
     def _applyCompactMode(self, compact: bool) -> None:
         self._header.setVisible(not compact)
@@ -298,6 +291,202 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class DeviceTile(QWidget):
+    """Clickable device icon tile with an embedded NIC/adaptor selector badge."""
+
+    def __init__(
+        self,
+        pixmap: QPixmap,
+        tooltip: str = "",
+        connect_callback=None,
+        adapter_provider=None,
+        selected_adapter_ip: str = "0.0.0.0",
+        adapter_selected_callback=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._adapter_provider = adapter_provider
+        self._selected_adapter_ip = (selected_adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
+        self._adapter_selected_callback = adapter_selected_callback
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(80, 80)
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.iconLabel = ClickableLabel(pixmap, tooltip=tooltip, callback=connect_callback, parent=self)
+        self.iconLabel.setFixedSize(72, 72)
+        self.iconLabel.setScaledContents(True)
+        layout.addWidget(self.iconLabel, 0, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._adapterMenu = QMenu(self)
+        self._adapterMenu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #0b111c;
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.35);
+                border-radius: 10px;
+                padding: 6px;
+            }
+            QMenu::item {
+                padding: 7px 18px 7px 28px;
+                border-radius: 8px;
+                background: transparent;
+            }
+            QMenu::item:selected {
+                background: rgba(0,210,255,0.18);
+            }
+            QMenu::item:disabled {
+                color: rgba(232, 236, 243, 120);
+            }
+            QMenu::separator {
+                height: 1px;
+                background: rgba(255,255,255,0.08);
+                margin: 6px 0px;
+            }
+            QMenu::indicator {
+                width: 14px;
+                height: 14px;
+                left: 7px;
+            }
+            QMenu::indicator:checked {
+                image: none;
+                border: 1px solid rgba(0,210,255,0.75);
+                background: rgba(0,210,255,0.30);
+                border-radius: 3px;
+            }
+            QMenu::indicator:unchecked {
+                image: none;
+                border: 1px solid rgba(255,255,255,0.18);
+                background: rgba(255,255,255,0.06);
+                border-radius: 3px;
+            }
+            """
+        )
+        self._adapterMenu.aboutToShow.connect(self._rebuildAdapterMenu)
+        self._adapterMenu.triggered.connect(self._onAdapterActionTriggered)
+
+        self.adapterButton = QToolButton(self)
+        self.adapterButton.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.adapterButton.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.adapterButton.setMenu(self._adapterMenu)
+        self.adapterButton.setToolTip("Select video network adapter (Ethernet/NIC)")
+        self.adapterButton.setStyleSheet(
+            """
+            QToolButton {
+                background: rgba(11, 17, 28, 220);
+                color: #e8ecf3;
+                border: 1px solid rgba(0,210,255,0.38);
+                border-radius: 8px;
+                padding: 2px 6px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QToolButton:hover {
+                background: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.55);
+            }
+            QToolButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+            """
+        )
+        self.adapterButton.setFixedHeight(18)
+        self.adapterButton.setMaximumWidth(70)
+        layout.addWidget(
+            self.adapterButton,
+            0,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
+
+        self._updateAdapterButtonText()
+
+
+    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+        self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
+        self._updateAdapterButtonText()
+
+
+    def _formatAdapterBadge(self, adapter_ip: str, options: list[NetworkInterfaceOption]) -> tuple[str, str]:
+        def short(text: str, max_len: int = 10) -> str:
+            text = text or ""
+            if len(text) <= max_len:
+                return text
+            return text[: max_len - 1] + "…"
+
+        if not adapter_ip or adapter_ip == "0.0.0.0":
+            return "Auto", "Auto (system routing)"
+
+        match = next((opt for opt in options if opt.ip == adapter_ip), None)
+        if match is None:
+            return short(adapter_ip), f"Adapter IP: {adapter_ip}"
+
+        return short(match.name), f"{match.name} ({match.ip})"
+
+
+    def _updateAdapterButtonText(self) -> None:
+        options: list[NetworkInterfaceOption] = []
+        if callable(self._adapter_provider):
+            try:
+                options = self._adapter_provider()
+            except Exception:
+                options = []
+        badge, tooltip = self._formatAdapterBadge(self._selected_adapter_ip, options)
+        self.adapterButton.setText(badge)
+        self.adapterButton.setToolTip(f"Video adapter: {tooltip}\nClick to change")
+
+
+    def _rebuildAdapterMenu(self) -> None:
+        self._adapterMenu.clear()
+
+        options: list[NetworkInterfaceOption] = []
+        if callable(self._adapter_provider):
+            try:
+                options = self._adapter_provider()
+            except Exception:
+                options = []
+
+        auto_action = QAction("Auto (system routing)", self._adapterMenu)
+        auto_action.setCheckable(True)
+        auto_action.setChecked(self._selected_adapter_ip in ("", "0.0.0.0"))
+        auto_action.setData("0.0.0.0")
+        self._adapterMenu.addAction(auto_action)
+        self._adapterMenu.addSeparator()
+
+        if not options:
+            disabled = QAction("No adapters found", self._adapterMenu)
+            disabled.setEnabled(False)
+            self._adapterMenu.addAction(disabled)
+            return
+
+        for opt in options:
+            label = f"{opt.name} ({opt.ip})"
+            action = QAction(label, self._adapterMenu)
+            action.setCheckable(True)
+            action.setChecked(opt.ip == self._selected_adapter_ip)
+            action.setData(opt.ip)
+            self._adapterMenu.addAction(action)
+
+
+    def _onAdapterActionTriggered(self, action: QAction) -> None:
+        try:
+            adapter_ip = str(action.data() or "0.0.0.0")
+        except Exception:
+            adapter_ip = "0.0.0.0"
+
+        self.setSelectedAdapterIp(adapter_ip)
+        if callable(self._adapter_selected_callback):
+            try:
+                self._adapter_selected_callback(adapter_ip)
+            except Exception:
+                pass
+
+
 class WelcomeWindow(QWidget):
 
     startRequested = pyqtSignal()  # emitted when user clicks Start
@@ -305,6 +494,10 @@ class WelcomeWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowType.Widget):
         super().__init__(parent, flags)
         self.setObjectName("welcome-panel")
+        self._device_tiles: list[DeviceTile] = []
+        self._adapter_provider = None
+        self._selected_adapter_ip: str = "0.0.0.0"
+        self._adapter_selected_callback = None
 
         # Make panel look premium
         self.setStyleSheet("""
@@ -397,6 +590,21 @@ class WelcomeWindow(QWidget):
         self._fadeAnim.setEndValue(1.0)
         self._fadeAnim.setEasingCurve(QEasingCurve.Type.InOutQuad)
 
+
+    def configureAdapterPicker(self, adapter_provider, selected_adapter_ip: str, adapter_selected_callback=None) -> None:
+        self._adapter_provider = adapter_provider
+        self._adapter_selected_callback = adapter_selected_callback
+        self.setSelectedAdapterIp(selected_adapter_ip)
+
+
+    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+        self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
+        for tile in self._device_tiles:
+            try:
+                tile.setSelectedAdapterIp(self._selected_adapter_ip)
+            except Exception:
+                pass
+
     def setStartButtonState(self, discovering: bool) -> None:
         """Enable/disable the start button with visual feedback."""
         if discovering:
@@ -430,12 +638,28 @@ class WelcomeWindow(QWidget):
         except Exception:
             icon = QPixmap()
 
-        lbl = ClickableLabel(icon, tooltip=f"{deviceTooltip}\nClick to connect", callback=connect_callback)
-        lbl._deviceTooltip = deviceTooltip
-        lbl._device_ip = deviceTooltip
-        lbl.setFixedSize(72, 72)
-        lbl.setScaledContents(True)
-        self._devices_layout.addWidget(lbl)
+        tile = DeviceTile(
+            icon,
+            tooltip=f"{deviceTooltip}\nClick to connect",
+            connect_callback=connect_callback,
+            adapter_provider=self._adapter_provider,
+            selected_adapter_ip=self._selected_adapter_ip,
+            adapter_selected_callback=self._onAdapterSelected,
+            parent=self,
+        )
+        tile._deviceTooltip = deviceTooltip
+        tile._device_ip = deviceTooltip
+        self._device_tiles.append(tile)
+        self._devices_layout.addWidget(tile)
+
+
+    def _onAdapterSelected(self, adapter_ip: str) -> None:
+        self.setSelectedAdapterIp(adapter_ip)
+        if callable(self._adapter_selected_callback):
+            try:
+                self._adapter_selected_callback(adapter_ip)
+            except Exception:
+                pass
 
 
 class BatteryIndicator(QWidget):
@@ -544,6 +768,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RC Control Studio")
         self.setMinimumSize(QSize(1080, 720))
         self.setWindowIcon(QIcon("icons/car.svg"))
+        self.__firstShow = True
 
         # Welcome
         self.__welcomeWindow = WelcomeWindow(self)
@@ -614,7 +839,6 @@ class MainWindow(QMainWindow):
         self.__tlmWindow    = VehicleTelemetryWindow(self)
         self.__streamWindow = VideoStreamingWindow()
         self.__fwWindow     = FirmwareUpdateWindow(self)
-        self.__vizWindow    = VisualizationWindow(self)
 
         # Side panel
         self.side = SidePanel(self)
@@ -623,6 +847,12 @@ class MainWindow(QMainWindow):
         
         # import UI consumer
         self.__consumer = BackendIface()
+        self.__adapter_ip = self.__consumer.getVideoOutAdapterIp()
+        self.__welcomeWindow.configureAdapterPicker(
+            self.__listAdapterOptions,
+            self.__adapter_ip,
+            self.__onAdapterIpSelected,
+        )
 
         # Disable side buttons until a device is connected
         self.side.btnTelem.setEnabled(False)
@@ -640,6 +870,51 @@ class MainWindow(QMainWindow):
         self.__consumer.start()
 
 
+    def __listAdapterOptions(self) -> list[NetworkInterfaceOption]:
+        try:
+            return list_ipv4_interfaces(include_down=False)
+        except Exception:
+            return []
+
+
+    def __onAdapterIpSelected(self, adapter_ip: str) -> None:
+        self.__adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
+        try:
+            self.__consumer.setVideoOutAdapterIp(self.__adapter_ip)
+        except Exception as exc:
+            logging.warning("Failed to apply adapter selection: %s", exc)
+
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_MainWindow__firstShow", False):
+            return
+        self.__firstShow = False
+
+        screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        avail = screen.availableGeometry()
+
+        # Size to something "big" by default, but never larger than the usable screen.
+        target_w = min(avail.width(), max(self.minimumWidth(), int(avail.width() * 0.92)))
+        target_h = min(avail.height(), max(self.minimumHeight(), int(avail.height() * 0.92)))
+        self.resize(target_w, target_h)
+
+        # Place slightly above center so it doesn't feel "low".
+        x = avail.left() + max(0, (avail.width() - self.width()) // 2)
+        y = avail.top() + max(20, int(avail.height() * 0.05))
+        if y + self.height() > avail.bottom():
+            y = max(avail.top() + 12, avail.bottom() - self.height() - 12)
+
+        self.move(int(x), int(y))
+        self.raise_()
+        self.activateWindow()
+
+
     def __connectSignals(self):
         """
         Handles connection of UI signals
@@ -647,7 +922,6 @@ class MainWindow(QMainWindow):
         self.side.showWelcome.connect(self.__showWelcome)
         self.side.showTlm.connect(self.__showTlm)
         self.side.showVideoStream.connect(self.__showVideo)
-        self.side.showVisualizer.connect(self.__showVisualizer)
         self.__welcomeWindow.startRequested.connect(self.__onDiscoveryStart)
         # When a device is discovered, show it on the welcome window
         self.__consumer.deviceDiscovered.connect(self.__onDeviceDiscovered)
@@ -670,11 +944,24 @@ class MainWindow(QMainWindow):
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
         
+        self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)
         self.__streamWindow.simulationSourceSelected.connect(self.__consumer.setSimulationSource)
         self.__streamWindow.fpsChanged.connect(self.__consumer.setFrameRate)
         self.__streamWindow.qualityChanged.connect(self.__consumer.setVideoQuality)
+        self.__streamWindow.minDisparitiesChanged.connect(self.__consumer.setMinDisparities)
+        self.__streamWindow.maxDisparitiesChanged.connect(self.__consumer.setMaxDisparities)
+        self.__streamWindow.confidenceThresholdChanged.connect(self.__consumer.setConfidenceThreshold)
+        self.__streamWindow.p1Changed.connect(self.__consumer.setP1)
+        self.__streamWindow.p2Changed.connect(self.__consumer.setP2)
+        self.__streamWindow.uniquenessRatioChanged.connect(self.__consumer.setUniquenessRatio)
+        self.__streamWindow.zMaxChanged.connect(self.__consumer.setZMax)
+        self.__streamWindow.zMinChanged.connect(self.__consumer.setZMin)
+        self.__streamWindow.depthThresholdChanged.connect(self.__consumer.setDepthThreshold)
+        self.__streamWindow.minAgreeingPixelsChanged.connect(self.__consumer.setMinAgreeingPixels)
+        self.__streamWindow.colorThresholdChanged.connect(self.__consumer.setColorThreshold)
+
         self.__streamWindow.streamOutRequested.connect(self.__consumer.startVideoStream)
         self.__streamWindow.stereoCalibrationApplyRequested.connect(self.__consumer.setStereoCalibrationParams)
         self.__streamWindow.calibrationCaptureRequested.connect(self.__consumer.captureCalibrationSample)
@@ -683,6 +970,8 @@ class MainWindow(QMainWindow):
         self.__streamWindow.calibrationResetRequested.connect(self.__consumer.resetCalibrationSamples)
         self.__streamWindow.calibrationStoreRequested.connect(self.__consumer.storeCalibrationResult)
         self.__streamWindow.saveVideoOnDevice.connect(self.__consumer.setSaveVideoOnDevice)
+        self.__streamWindow.recordingStateChanged.connect(self.__consumer.setRecordingState)
+        self.__streamWindow.disparityRenderModeChanged.connect(self.__consumer.setDisparityRenderMode)
         self.__streamWindow.deviceVideoLoadRequested.connect(self.__consumer.loadDeviceVideo)
         self.__streamWindow.deviceVideoDeleteRequested.connect(self.__consumer.deleteDeviceVideo)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
@@ -895,12 +1184,6 @@ class MainWindow(QMainWindow):
 
     def __showVideo(self) -> None:
         self.__setContent(self.__streamWindow)
-
-
-    def __showVisualizer(self) -> None:
-        """Show the 3D visualization window."""
-        self.__setContent(self.__vizWindow)
-
 
 
     def __showFirmware(self) -> None:

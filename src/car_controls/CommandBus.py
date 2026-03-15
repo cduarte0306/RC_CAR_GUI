@@ -51,23 +51,35 @@ class CameraCommand(ctypes.Structure):
         ("data", val_type_t),
         ("payloadLen", ctypes.c_uint32),
     ]
-    
+
 class CamCommands(Enum):
-    CmdStartStream          = 0
-    CmdStopStream           = auto()
-    CmdSelCameraStream      = auto()
-    CmdSetFps               = auto()
-    CmdSetQuality           = auto()
-    CmdRdParams             = auto()
-    CmdClrVideoRec          = auto()
-    CmdSaveVideo            = auto()
-    CmdLoadStoredVideos     = auto()
-    CmdLoadSelectedVideo    = auto()
-    CmdDeleteVideo          = auto()
-    CmdCalibrationSetState  = auto()
-    CmdCalibrationWrtParams = auto()
-    CmdCalibrationSave      = auto()
-    
+    # IDs pinned to host enum order in `.vscode/test2`.
+    CmdStartStream            = 0
+    CmdStopStream             = 1
+    CmdSelCameraStream        = 2
+    CmdSetFps                 = 3
+    CmdSetQuality             = 4
+    CmdSetMinDisparities      = 5
+    CmdSetMaxDisparities      = 6
+    CmdSetConfidenceThreshold = 7
+    CmdSetUniquenessRatio     = 8
+    CmdSetP1                  = 9
+    CmdSetP2                  = 10
+    CmdSetZMax                = 11
+    CmdSetZMin                = 12
+    CmdSetDepthThreshold      = 13
+    CmdSetMinAgreeingPixels   = 14
+    CmdSetColorThreshold      = 15
+    CmdRdParams               = 16
+    CmdClrVideoRec            = 17
+    CmdSaveVideo              = 18
+    CmdLoadStoredVideos       = 19
+    CmdLoadSelectedVideo      = 20
+    CmdDeleteVideo            = 21
+    CmdCalibrationSetState    = 22
+    CmdCalibrationWrtParams   = 23
+    CmdCalibrationReset       = 24
+    CmdCalibrationSave        = 25
 
 class CamStreamSelectionModes(Enum):
     StreamCameraSource = 0
@@ -297,6 +309,8 @@ class CommandBus:
                     seq_id = self._seq_id & 0xFFFF
                     self._seq_id = (seq_id + 1) & 0xFFFF
                     # Track all commands so replies can be matched by sequence id
+                    if cmd == None:
+                        print("CommandBus: cmd is None!")
                     self.__commandSentBank[seq_id] = cmd
                     packet_bytes = self._build_packet(cmd, seq_id)
                 ok = self._udp.send(packet_bytes)

@@ -2,17 +2,65 @@ from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
     QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
     QApplication, QListWidget, QListWidgetItem, QMenu, QSpinBox, QDoubleSpinBox,
-    QFormLayout, QScrollArea, QCheckBox, QSlider
+    QFormLayout, QScrollArea, QCheckBox, QSlider, QToolButton
 )
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor
-from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor, QAction
+from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData, QPropertyAnimation, QEasingCurve
 import numpy as np
 import os
 import json
+import cv2
 
 os.environ["QT_LOGGING_RULES"] = "*.debug=false; *.warning=false"
 
 import logging
+
+
+class ButtonDropDown(QPushButton, QSpinBox):
+    selectionChanged = pyqtSignal(str)
+
+    def __init__(self, options: list[str] | None = None, default: str | None = None, parent=None):
+        QPushButton.__init__(self, parent)
+        self._menu = QMenu(self)
+        self._actions: dict[str, QAction] = {}
+        self._current: str | None = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self._showMenu)
+        self.setOptions(options or [])
+        if default:
+            self.setCurrent(default)
+        elif options:
+            self.setCurrent(options[0])
+
+    def setOptions(self, options: list[str]) -> None:
+        self._menu.clear()
+        self._actions.clear()
+        for item in options:
+            action = self._menu.addAction(str(item))
+            action.triggered.connect(lambda checked=False, v=str(item): self.setCurrent(v))
+            self._actions[str(item)] = action
+
+    def setCurrent(self, value: str) -> None:
+        if value not in self._actions:
+            action = self._menu.addAction(str(value))
+            action.triggered.connect(lambda checked=False, v=str(value): self.setCurrent(v))
+            self._actions[str(value)] = action
+        if self._current == value:
+            return
+        self._current = value
+        self.setText(value)
+        self.setProperty("buttonType", value)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.selectionChanged.emit(value)
+
+    def current(self) -> str | None:
+        return self._current
+
+    def _showMenu(self) -> None:
+        if not self._actions:
+            return
+        self._menu.exec(self.mapToGlobal(QPoint(0, self.height())))
 
 
 class IconButton(QPushButton):
@@ -67,6 +115,116 @@ class IconButton(QPushButton):
         self._icon_pressed = icon
         self.setIcon(icon)
         self.setIconSize(self._base_icon_size)
+
+
+class CollapsibleSection(QWidget):
+    toggled = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        content: QWidget,
+        expanded: bool = False,
+        max_expanded_height: int | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._expanded = bool(expanded)
+        self._max_expanded_height = max_expanded_height
+
+        self._toggle = QToolButton(self)
+        self._toggle.setObjectName("collapsibleToggle")
+        self._toggle.setText(title)
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(self._expanded)
+        self._toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._toggle.setArrowType(Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow)
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.setAutoRaise(False)
+        self._toggle.clicked.connect(self._onToggleClicked)
+        self._toggle.setStyleSheet(
+            """
+            QToolButton#collapsibleToggle {
+                background: rgba(255,255,255,0.04);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.10);
+                border-left: 4px solid rgba(118,185,0,0.9);
+                border-radius: 12px;
+                padding: 10px 12px;
+                font-size: 13px;
+                font-weight: 700;
+                text-align: left;
+            }
+            QToolButton#collapsibleToggle:hover {
+                background: rgba(0,210,255,0.10);
+                border: 1px solid rgba(0,210,255,0.35);
+                border-left: 4px solid rgba(118,185,0,1.0);
+            }
+            QToolButton#collapsibleToggle:checked {
+                background: rgba(0,210,255,0.12);
+                border: 1px solid rgba(0,210,255,0.45);
+                border-left: 4px solid rgba(118,185,0,1.0);
+            }
+            """
+        )
+
+        self._content = content
+        self._content.setObjectName("collapsibleContent")
+        self._content.setVisible(self._expanded)
+        self._content.setMaximumHeight(16777215 if self._expanded else 0)
+
+        self._anim = QPropertyAnimation(self._content, b"maximumHeight", self)
+        self._anim.setDuration(170)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._anim.finished.connect(self._onAnimFinished)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+        root.addWidget(self._toggle)
+        root.addWidget(self._content)
+
+    def isExpanded(self) -> bool:
+        return self._expanded
+
+    def setExpanded(self, expanded: bool) -> None:
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+
+        self._toggle.blockSignals(True)
+        self._toggle.setChecked(self._expanded)
+        self._toggle.blockSignals(False)
+        self._toggle.setArrowType(Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow)
+
+        self._anim.stop()
+        start_h = int(self._content.height()) if self._content.isVisible() else 0
+        if self._expanded:
+            self._content.setVisible(True)
+            self._content.setMaximumHeight(0)
+            self._content.adjustSize()
+            target_h = int(self._content.sizeHint().height())
+            if self._max_expanded_height is not None:
+                target_h = min(target_h, int(self._max_expanded_height))
+        else:
+            target_h = 0
+        self._anim.setStartValue(start_h)
+        self._anim.setEndValue(target_h)
+        self._anim.start()
+
+        self.toggled.emit(self._expanded)
+
+    def _onToggleClicked(self) -> None:
+        self.setExpanded(self._toggle.isChecked())
+
+    def _onAnimFinished(self) -> None:
+        if self._expanded:
+            self._content.setMaximumHeight(
+                int(self._max_expanded_height) if self._max_expanded_height is not None else 16777215
+            )
+        else:
+            self._content.setVisible(False)
 
 
 class TearOffTabBar(QTabBar):
@@ -211,35 +369,50 @@ class DockHandle(QFrame):
 
 class VideoStreamingWindow(QWidget):
 
-    startStreamOut             = pyqtSignal(bool, str) # File selected signals
-    streamOutRequested         = pyqtSignal(bool, str) # Start/stop outbound stream request
-    fpsChanged                 = pyqtSignal(int)       # Emitted when FPS selection changes
-    qualityChanged             = pyqtSignal(int)       # Emitted when quality slider is released
-    cameraSourceSelected       = pyqtSignal(bool)      # calibration mode on/off for camera source
-    simulationSourceSelected   = pyqtSignal()          # request simulation source
-    stereoMonoModeChanged      = pyqtSignal(str)       # "normal", "disparity"
-    uploadVideoClicked         = pyqtSignal(str)       # File selected signal
-    deviceVideoLoadRequested   = pyqtSignal(str)       # Device video selection signal
-    deviceVideoDeleteRequested = pyqtSignal(str)       # Device video deletion signal
-    setNormalMode              = pyqtSignal()
-    setDisparityMode           = pyqtSignal()
-    saveVideoOnDevice          = pyqtSignal(str)       # Signal to save video on device
-    stereoCalibrationApplyRequested = pyqtSignal(dict)  # Apply calibration parameters to camera
-    calibrationModeToggled     = pyqtSignal(bool)      # Start/stop calibration mode
-    calibrationCaptureRequested = pyqtSignal()         # Capture a calibration sample
-    calibrationPauseToggled    = pyqtSignal(bool)      # Pause/resume calibration capture
-    calibrationAbortRequested  = pyqtSignal()          # Abort calibration session
-    calibrationResetRequested  = pyqtSignal()          # Reset captured samples
-    calibrationStoreRequested  = pyqtSignal()          # Store current calibration results on host
+    startStreamOut                  = pyqtSignal(bool, str)        # File selected signals
+    streamOutRequested              = pyqtSignal(bool, str)        # Start/stop outbound stream request
+    fpsChanged                      = pyqtSignal(int)              # Emitted when FPS selection changes
+    qualityChanged                  = pyqtSignal(int)              # Emitted when quality slider is released
+    cameraSourceSelected            = pyqtSignal(bool)             # calibration mode on/off for camera source
+    simulationSourceSelected        = pyqtSignal()                 # request simulation source
+    stereoMonoModeChanged           = pyqtSignal(str)              # "normal", "disparity"
+    disparityRenderModeChanged      = pyqtSignal(str)              # "depth", "disparity"
+    minDisparitiesChanged           = pyqtSignal(int)              # Emitted when min disparity slider is released
+    maxDisparitiesChanged           = pyqtSignal(int)              # Emitted when max disparity slider is released
+    confidenceThresholdChanged      = pyqtSignal(int)              # Emitted when confidence threshold slider is released
+    p1Changed                       = pyqtSignal(int)              # Emitted when P1 slider is released
+    p2Changed                       = pyqtSignal(int)              # Emitted when P2 slider is released
+    uniquenessRatioChanged          = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
+    zMaxChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
+    zMinChanged                     = pyqtSignal(int)              # Emitted when uniqueness ratio slider is released
+    depthThresholdChanged           = pyqtSignal(int)              # Emitted when depth threshold slider is released
+    minAgreeingPixelsChanged        = pyqtSignal(int)              # Emitted when min agreeing pixels slider is released
+    colorThresholdChanged           = pyqtSignal(int)              # Emitted when color threshold slider is released
+
+    uploadVideoClicked              = pyqtSignal(str)              # File selected signal
+    deviceVideoLoadRequested        = pyqtSignal(str)              # Device video selection signal
+    deviceVideoDeleteRequested      = pyqtSignal(str)              # Device video deletion signal
+    setNormalMode                   = pyqtSignal()
+    setDisparityMode                = pyqtSignal()
+    saveVideoOnDevice               = pyqtSignal(str)              # Signal to save video on device
+    recordingStateChanged           = pyqtSignal(bool, str, int)   # Local recording state + path
+    stereoCalibrationApplyRequested = pyqtSignal(dict)             # Apply calibration parameters to camera
+    calibrationModeToggled          = pyqtSignal(bool)             # Start/stop calibration mode
+    calibrationCaptureRequested     = pyqtSignal()                 # Capture a calibration sample
+    calibrationPauseToggled         = pyqtSignal(bool)             # Pause/resume calibration capture
+    calibrationAbortRequested       = pyqtSignal()                 # Abort calibration session
+    calibrationResetRequested       = pyqtSignal()                 # Reset captured samples
+    calibrationStoreRequested       = pyqtSignal()                 # Store current calibration results on host
     
     def __init__(self, parent=None):
         super().__init__(parent)
 
         # Persist user-selected file path across app restarts
         self.__settings = QSettings("RC_CAR_GUI", "VideoStreaming")
+        self.__recordPath = self.__settings.value("recordPath", "", str)
 
         # Ensure the viewport has space before first frame arrives
-        self.setMinimumSize(640, 480)
+        self.setMinimumSize(900, 650)
 
         root = QVBoxLayout()
         root.setContentsMargins(18, 18, 18, 18)
@@ -252,6 +425,34 @@ class VideoStreamingWindow(QWidget):
         title.setObjectName("card-title")
         header.addWidget(title)
         header.addStretch()
+        
+        self.__buttonSel = ButtonDropDown(["Record Video", "Record Point Cloud"])
+
+        self.__recordBtn = QPushButton("REC")
+        self.__recordBtn.setFixedHeight(28)
+        self.__recordBtn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.__recordBtn.setToolTip("Start recording to disk")
+        self.__recordBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(210, 45, 45, 0.85);
+                color: #fff;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                padding: 4px 10px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover {
+                background-color: rgba(230, 65, 65, 0.95);
+            }
+            QPushButton:pressed {
+                background-color: rgba(190, 35, 35, 0.95);
+            }
+            """
+        )
+        header.addWidget(self.__recordBtn)
+        header.addWidget(self.__buttonSel)
 
         self.__streamMode = "stereo"
         self.__streamModeButtons: dict[str, QPushButton] = {}
@@ -261,6 +462,7 @@ class VideoStreamingWindow(QWidget):
         self.__stereoMonoButtons: dict[str, QPushButton] = {}
         self.__stereoMonoGroup = QButtonGroup(self)
         self.__stereoMonoGroup.setExclusive(True)
+        self.__disparityRenderMode = "depth"
         root.addLayout(header)
 
         # Tabs
@@ -321,16 +523,106 @@ class VideoStreamingWindow(QWidget):
         placeholder = QPixmap(1, 1)
         placeholder.fill(Qt.GlobalColor.black)
         self.__videoLabel.setPixmap(placeholder)
+        self.__videoLabel.setMinimumHeight(360)
 
-        viewerLayout.addWidget(self.__videoLabel)
+        viewerLayout.addWidget(self.__videoLabel, stretch=1)
+
+        viewer_settings_expanded = self.__settings.value("viewerSettingsExpanded", False, bool)
+
+        scroll_style = """
+        QScrollArea { border: none; background-color: transparent; }
+        QScrollArea::viewport { background-color: transparent; }
+        QScrollBar:vertical {
+            background-color: rgba(255,255,255,0.04);
+            width: 10px;
+            margin: 2px 0 2px 0;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:vertical {
+            background-color: rgba(0,210,255,0.22);
+            border: 1px solid rgba(0,210,255,0.25);
+            min-height: 22px;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background-color: rgba(0,210,255,0.32);
+            border: 1px solid rgba(0,210,255,0.35);
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+            subcontrol-origin: margin;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background-color: transparent;
+        }
+        """
+
+        viewerSettingsBody = QWidget()
+        viewerSettingsBody.setStyleSheet("background-color: transparent;")
+        viewerSettingsLayout = QVBoxLayout(viewerSettingsBody)
+        viewerSettingsLayout.setContentsMargins(0, 0, 0, 0)
+        viewerSettingsLayout.setSpacing(10)
+
+        recordPathCard = QFrame()
+        recordPathCard.setStyleSheet(
+            "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);"
+        )
+        recordPathRow = QHBoxLayout(recordPathCard)
+        recordPathRow.setContentsMargins(12, 10, 12, 10)
+        recordPathRow.setSpacing(8)
+        recordPathLabel = QLabel("Record path")
+        recordPathLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__recordPathEdit = QLineEdit()
+        self.__recordPathEdit.setPlaceholderText("Select a folder for recordings")
+        if self.__recordPath:
+            self.__recordPathEdit.setText(self.__recordPath)
+        self.__recordPathEdit.setMinimumHeight(30)
+        self.__recordPathEdit.setStyleSheet(
+            """
+            QLineEdit {
+                background-color: rgba(255,255,255,0.06);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 12px;
+            }
+            QLineEdit:hover {
+                background-color: rgba(0,210,255,0.12);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            QLineEdit:focus {
+                border: 1px solid rgba(0,210,255,0.65);
+            }
+            """
+        )
+        self.__recordBrowseBtn = IconButton(QIcon("icons/file-manager-icon.svg"), icon_size=QSize(20, 20))
+        self.__recordBrowseBtn.setFixedSize(30, 30)
+        self.__recordBrowseBtn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.16);
+                border: 1px solid rgba(0,210,255,0.35);
+            }
+            """
+        )
+        recordPathRow.addWidget(recordPathLabel)
+        recordPathRow.addWidget(self.__recordPathEdit, stretch=1)
+        recordPathRow.addWidget(self.__recordBrowseBtn)
+        viewerSettingsLayout.addWidget(recordPathCard)
 
         videoControlCard = QFrame()
         videoControlCard.setStyleSheet(
             "border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.03);"
         )
-        videoControlLayout = QHBoxLayout(videoControlCard)
-        videoControlLayout.setContentsMargins(12, 8, 12, 8)
-        videoControlLayout.setSpacing(12)
+        videoControlLayout = QVBoxLayout(videoControlCard)
+        videoControlLayout.setContentsMargins(12, 6, 12, 6)
+        videoControlLayout.setSpacing(6)
 
         fpsTitle = QLabel("FPS")
         fpsTitle.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
@@ -393,13 +685,338 @@ class VideoStreamingWindow(QWidget):
         self.__qualityValueLabel = QLabel(str(self.__qualitySlider.value()))
         self.__qualityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
 
-        videoControlLayout.addWidget(fpsTitle)
-        videoControlLayout.addWidget(self.__fpsCombo)
-        videoControlLayout.addSpacing(12)
-        videoControlLayout.addWidget(qualityLabel)
-        videoControlLayout.addWidget(self.__qualitySlider, stretch=1)
-        videoControlLayout.addWidget(self.__qualityValueLabel)
-        viewerLayout.addWidget(videoControlCard)
+        minDispLabel = QLabel("Min Disparity")
+        minDispLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__minDisparitySlider = QSlider(Qt.Orientation.Horizontal)
+        self.__minDisparitySlider.setRange(0, 256)
+        self.__minDisparitySlider.setValue(0)
+        self.__minDisparitySlider.setSingleStep(1)
+        self.__minDisparitySlider.setPageStep(8)
+        self.__minDisparitySlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__minDisparityValueLabel = QLabel(str(self.__minDisparitySlider.value()))
+        self.__minDisparityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        maxDispLabel = QLabel("Max Disparity")
+        maxDispLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__maxDisparitySlider = QSlider(Qt.Orientation.Horizontal)
+        self.__maxDisparitySlider.setRange(16, 256)
+        self.__maxDisparitySlider.setValue(64)
+        self.__maxDisparitySlider.setSingleStep(16)
+        self.__maxDisparitySlider.setPageStep(32)
+        self.__maxDisparitySlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__maxDisparityValueLabel = QLabel(str(self.__maxDisparitySlider.value()))
+        self.__maxDisparityValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        confidenceThresholdLabel = QLabel("Confidence Threshold")
+        confidenceThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__confidenceThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__confidenceThresholdSlider.setRange(0, 65535)
+        self.__confidenceThresholdSlider.setValue(32767)
+        self.__confidenceThresholdSlider.setSingleStep(1)
+        self.__confidenceThresholdSlider.setPageStep(1000)
+        self.__confidenceThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__confidenceThresholdValueLabel = QLabel(str(self.__confidenceThresholdSlider.value()))
+        self.__confidenceThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        p1Label = QLabel("P1")
+        p1Label.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__p1Slider = QSlider(Qt.Orientation.Horizontal)
+        self.__p1Slider.setRange(1, 255)
+        self.__p1Slider.setValue(3)
+        self.__p1Slider.setSingleStep(1)
+        self.__p1Slider.setPageStep(25)
+        self.__p1Slider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__p1ValueLabel = QLabel(str(self.__p1Slider.value()))
+        self.__p1ValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        p2Label = QLabel("P2")
+        p2Label.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__p2Slider = QSlider(Qt.Orientation.Horizontal)
+        self.__p2Slider.setRange(1, 255)
+        self.__p2Slider.setValue(48)
+        self.__p2Slider.setSingleStep(1)
+        self.__p2Slider.setPageStep(50)
+        self.__p2Slider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__p2ValueLabel = QLabel(str(self.__p2Slider.value()))
+        self.__p2ValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        uniquenessRatioLabel = QLabel("Uniqueness (ratio)")
+        uniquenessRatioLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__uniquenessRatioSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__uniquenessRatioSlider.setRange(0, 100)
+        self.__uniquenessRatioSlider.setValue(0)
+        self.__uniquenessRatioSlider.setSingleStep(1)
+        self.__uniquenessRatioSlider.setPageStep(10)
+        self.__uniquenessRatioSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__uniquenessRatioValueLabel = QLabel(f"{self.__uniquenessRatioSlider.value() / 100.0:.2f}")
+        self.__uniquenessRatioValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+        
+        ZMinLabel = QLabel("Z Min")
+        ZMinLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__ZMinSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__ZMinSlider.setRange(0, 5000)
+        self.__ZMinSlider.setValue(0)
+        self.__ZMinSlider.setSingleStep(1)
+        self.__ZMinSlider.setPageStep(100)
+        self.__ZMinSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__ZMinSliderValueLabel = QLabel(f"{self.__ZMinSlider.value() / 100.0:.2f}")
+        self.__ZMinSliderValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        ZMaxLabel = QLabel("Z Max")
+        ZMaxLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__ZMaxSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__ZMaxSlider.setRange(0, 5000)
+        self.__ZMaxSlider.setValue(5000)
+        self.__ZMaxSlider.setSingleStep(1)
+        self.__ZMaxSlider.setPageStep(100)
+        self.__ZMaxSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__ZMaxSliderValueLabel = QLabel(f"{self.__ZMaxSlider.value() / 100.0:.2f}")
+        self.__ZMaxSliderValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        depthThresholdLabel = QLabel("Depth Thresh")
+        depthThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__depthThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__depthThresholdSlider.setRange(0, 1000)
+        self.__depthThresholdSlider.setValue(0)
+        self.__depthThresholdSlider.setSingleStep(1)
+        self.__depthThresholdSlider.setPageStep(50)
+        self.__depthThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__depthThresholdValueLabel = QLabel(f"{self.__depthThresholdSlider.value() / 100.0:.2f}")
+        self.__depthThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        minAgreeingPixelsLabel = QLabel("Min Agree Px")
+        minAgreeingPixelsLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__minAgreeingPixelsSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__minAgreeingPixelsSlider.setRange(0, 50)
+        self.__minAgreeingPixelsSlider.setValue(1)
+        self.__minAgreeingPixelsSlider.setSingleStep(1)
+        self.__minAgreeingPixelsSlider.setPageStep(5)
+        self.__minAgreeingPixelsSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__minAgreeingPixelsValueLabel = QLabel(str(self.__minAgreeingPixelsSlider.value()))
+        self.__minAgreeingPixelsValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        colorThresholdLabel = QLabel("Color Thresh")
+        colorThresholdLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__colorThresholdSlider = QSlider(Qt.Orientation.Horizontal)
+        self.__colorThresholdSlider.setRange(0, 1000)
+        self.__colorThresholdSlider.setValue(0)
+        self.__colorThresholdSlider.setSingleStep(1)
+        self.__colorThresholdSlider.setPageStep(50)
+        self.__colorThresholdSlider.setStyleSheet(self.__qualitySlider.styleSheet())
+        self.__colorThresholdValueLabel = QLabel(f"{self.__colorThresholdSlider.value() / 100.0:.2f}")
+        self.__colorThresholdValueLabel.setStyleSheet("color: #e8ecf3; font-size: 12px; font-weight: 600;")
+
+        renderLabel = QLabel("RGB Depth")
+        renderLabel.setStyleSheet("color: #9ba7b4; font-size: 12px; font-weight: 600;")
+        self.__disparityRenderButtons: dict[str, QPushButton] = {}
+        self.__disparityRenderGroup = QButtonGroup(self)
+        self.__disparityRenderGroup.setExclusive(True)
+        for mode, label in (
+            ("depth", "On"),
+            ("disparity", "Off"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(255,255,255,0.06);
+                    color: #e8ecf3;
+                    border: 1px solid rgba(255,255,255,0.12);
+                    border-radius: 8px;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(0,210,255,0.14);
+                    border: 1px solid rgba(0,210,255,0.32);
+                }
+                QPushButton:checked {
+                    background-color: rgba(0,210,255,0.18);
+                    border: 1px solid rgba(0,210,255,0.65);
+                    color: #0fd3ff;
+                }
+                """
+            )
+            btn.clicked.connect(lambda checked, m=mode: self.__setDisparityRenderMode(m))
+            self.__disparityRenderGroup.addButton(btn)
+            self.__disparityRenderButtons[mode] = btn
+        self.__disparityRenderButtons[self.__disparityRenderMode].setChecked(True)
+
+        for widget in (
+            fpsTitle,
+            self.__fpsCombo,
+            qualityLabel,
+            self.__qualityValueLabel,
+            minDispLabel,
+            self.__minDisparityValueLabel,
+            maxDispLabel,
+            self.__maxDisparityValueLabel,
+            confidenceThresholdLabel,
+            self.__confidenceThresholdValueLabel,
+            p1Label,
+            self.__p1ValueLabel,
+            p2Label,
+            self.__p2ValueLabel,
+            uniquenessRatioLabel,
+            self.__uniquenessRatioValueLabel,
+            ZMinLabel,
+            self.__ZMinSliderValueLabel,
+            ZMaxLabel,
+            self.__ZMaxSliderValueLabel,
+            depthThresholdLabel,
+            self.__depthThresholdValueLabel,
+            minAgreeingPixelsLabel,
+            self.__minAgreeingPixelsValueLabel,
+            colorThresholdLabel,
+            self.__colorThresholdValueLabel,
+            renderLabel,
+        ):
+            widget.setFixedHeight(18)
+        for slider in (
+            self.__minDisparitySlider,
+            self.__qualitySlider,
+            self.__maxDisparitySlider,
+            self.__confidenceThresholdSlider,
+            self.__p1Slider,
+            self.__p2Slider,
+            self.__uniquenessRatioSlider,
+            self.__ZMinSlider,
+            self.__ZMaxSlider,
+            self.__depthThresholdSlider,
+            self.__minAgreeingPixelsSlider,
+            self.__colorThresholdSlider,
+        ):
+            slider.setFixedHeight(18)
+        for value_label in (
+            self.__minDisparityValueLabel,
+            self.__qualityValueLabel,
+            self.__maxDisparityValueLabel,
+            self.__confidenceThresholdValueLabel,
+            self.__p1ValueLabel,
+            self.__p2ValueLabel,
+            self.__uniquenessRatioValueLabel,
+            self.__ZMinSliderValueLabel,
+            self.__ZMaxSliderValueLabel,
+            self.__depthThresholdValueLabel,
+            self.__minAgreeingPixelsValueLabel,
+            self.__colorThresholdValueLabel,
+        ):
+            value_label.setFixedWidth(48)
+
+        fpsRow = QHBoxLayout()
+        fpsRow.setSpacing(8)
+        fpsRow.addWidget(fpsTitle)
+        fpsRow.addWidget(self.__fpsCombo)
+        fpsRow.addStretch()
+
+        qualityRow = QHBoxLayout()
+        qualityRow.setSpacing(8)
+        qualityRow.addWidget(qualityLabel)
+        qualityRow.addWidget(self.__qualitySlider, stretch=1)
+        qualityRow.addWidget(self.__qualityValueLabel)
+
+        minDispRow = QHBoxLayout()
+        minDispRow.setSpacing(8)
+        minDispRow.addWidget(minDispLabel)
+        minDispRow.addWidget(self.__minDisparitySlider, stretch=1)
+        minDispRow.addWidget(self.__minDisparityValueLabel)
+
+        maxDispRow = QHBoxLayout()
+        maxDispRow.setSpacing(8)
+        maxDispRow.addWidget(maxDispLabel)
+        maxDispRow.addWidget(self.__maxDisparitySlider, stretch=1)
+        maxDispRow.addWidget(self.__maxDisparityValueLabel)
+
+        confidenceThresholdRow = QHBoxLayout()
+        confidenceThresholdRow.setSpacing(8)
+        confidenceThresholdRow.addWidget(confidenceThresholdLabel)
+        confidenceThresholdRow.addWidget(self.__confidenceThresholdSlider, stretch=1)
+        confidenceThresholdRow.addWidget(self.__confidenceThresholdValueLabel)
+
+        p1Row = QHBoxLayout()
+        p1Row.setSpacing(8)
+        p1Row.addWidget(p1Label)
+        p1Row.addWidget(self.__p1Slider, stretch=1)
+        p1Row.addWidget(self.__p1ValueLabel)
+
+        p2Row = QHBoxLayout()
+        p2Row.setSpacing(8)
+        p2Row.addWidget(p2Label)
+        p2Row.addWidget(self.__p2Slider, stretch=1)
+        p2Row.addWidget(self.__p2ValueLabel)
+
+        uniquenessRatioRow = QHBoxLayout()
+        uniquenessRatioRow.setSpacing(8)
+        uniquenessRatioRow.addWidget(uniquenessRatioLabel)
+        uniquenessRatioRow.addWidget(self.__uniquenessRatioSlider, stretch=1)
+        uniquenessRatioRow.addWidget(self.__uniquenessRatioValueLabel)
+        
+        zminRow = QHBoxLayout()
+        zminRow.setSpacing(8)
+        zminRow.addWidget(ZMinLabel)
+        zminRow.addWidget(self.__ZMinSlider, stretch=1)
+        zminRow.addWidget(self.__ZMinSliderValueLabel)
+
+        zmaxRow = QHBoxLayout()
+        zmaxRow.setSpacing(8)
+        zmaxRow.addWidget(ZMaxLabel)
+        zmaxRow.addWidget(self.__ZMaxSlider, stretch=1)
+        zmaxRow.addWidget(self.__ZMaxSliderValueLabel)
+
+        depthThresholdRow = QHBoxLayout()
+        depthThresholdRow.setSpacing(8)
+        depthThresholdRow.addWidget(depthThresholdLabel)
+        depthThresholdRow.addWidget(self.__depthThresholdSlider, stretch=1)
+        depthThresholdRow.addWidget(self.__depthThresholdValueLabel)
+
+        minAgreeingPixelsRow = QHBoxLayout()
+        minAgreeingPixelsRow.setSpacing(8)
+        minAgreeingPixelsRow.addWidget(minAgreeingPixelsLabel)
+        minAgreeingPixelsRow.addWidget(self.__minAgreeingPixelsSlider, stretch=1)
+        minAgreeingPixelsRow.addWidget(self.__minAgreeingPixelsValueLabel)
+
+        colorThresholdRow = QHBoxLayout()
+        colorThresholdRow.setSpacing(8)
+        colorThresholdRow.addWidget(colorThresholdLabel)
+        colorThresholdRow.addWidget(self.__colorThresholdSlider, stretch=1)
+        colorThresholdRow.addWidget(self.__colorThresholdValueLabel)
+
+        renderRow = QHBoxLayout()
+        renderRow.setSpacing(8)
+        renderRow.addWidget(renderLabel)
+        renderRow.addStretch()
+        renderRow.addWidget(self.__disparityRenderButtons["depth"])
+        renderRow.addWidget(self.__disparityRenderButtons["disparity"])
+
+        videoControlLayout.addLayout(fpsRow)
+        videoControlLayout.addLayout(qualityRow)
+        videoControlLayout.addLayout(minDispRow)
+        videoControlLayout.addLayout(maxDispRow)
+        videoControlLayout.addLayout(confidenceThresholdRow)
+        videoControlLayout.addLayout(uniquenessRatioRow)
+        videoControlLayout.addLayout(p1Row)
+        videoControlLayout.addLayout(p2Row)
+        videoControlLayout.addLayout(zminRow)
+        videoControlLayout.addLayout(zmaxRow)
+        videoControlLayout.addLayout(depthThresholdRow)
+        videoControlLayout.addLayout(minAgreeingPixelsRow)
+        videoControlLayout.addLayout(colorThresholdRow)
+        videoControlLayout.addLayout(renderRow)
+        viewerSettingsLayout.addWidget(videoControlCard)
+
+        viewerSettingsScroll = QScrollArea()
+        viewerSettingsScroll.setWidgetResizable(True)
+        viewerSettingsScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        viewerSettingsScroll.setFrameShape(QFrame.Shape.NoFrame)
+        viewerSettingsScroll.setStyleSheet(scroll_style)
+        viewerSettingsScroll.setWidget(viewerSettingsBody)
+
+        self.__viewerSettingsSection = CollapsibleSection(
+            "Settings", viewerSettingsScroll, expanded=viewer_settings_expanded, max_expanded_height=300
+        )
+        self.__viewerSettingsSection.toggled.connect(lambda v: self.__settings.setValue("viewerSettingsExpanded", v))
         self.__tabs.addTab(viewerTab, "Viewer")
 
         # Controls tab
@@ -412,6 +1029,22 @@ class VideoStreamingWindow(QWidget):
         controlsLayout.setContentsMargins(8, 8, 8, 8)
         controlsLayout.setSpacing(12)
         controlsTab.setLayout(controlsLayout)
+
+        controlsBody = QWidget()
+        controlsBody.setStyleSheet("background-color: transparent;")
+        controlsBodyLayout = QVBoxLayout(controlsBody)
+        controlsBodyLayout.setContentsMargins(0, 0, 0, 0)
+        controlsBodyLayout.setSpacing(12)
+        controlsScroll = QScrollArea()
+        controlsScroll.setWidgetResizable(True)
+        controlsScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controlsScroll.setFrameShape(QFrame.Shape.NoFrame)
+        controlsScroll.setStyleSheet(scroll_style)
+        controlsScroll.setWidget(controlsBody)
+        controlsLayout.addWidget(controlsScroll)
+
+        # Move stream configuration controls to the Stream Controls tab.
+        controlsBodyLayout.addWidget(self.__viewerSettingsSection)
 
         # Stream mode buttons (Stereo/Training)
         streamCard = QFrame()
@@ -460,7 +1093,7 @@ class VideoStreamingWindow(QWidget):
         self.__streamModeButtons[self.__streamMode].setChecked(True)
         streamRow.addStretch()
         streamCardLayout.addLayout(streamRow)
-        controlsLayout.addWidget(streamCard)
+        controlsBodyLayout.addWidget(streamCard)
 
         # Stereo sub-modes
         stereoMonoCard = QFrame()
@@ -513,7 +1146,8 @@ class VideoStreamingWindow(QWidget):
         self.__stereoMonoButtons[self.__stereoMonoMode].setChecked(True)
         stereoMonoRow.addStretch()
         stereoMonoCardLayout.addLayout(stereoMonoRow)
-        controlsLayout.addWidget(stereoMonoCard)
+
+        controlsBodyLayout.addWidget(stereoMonoCard)
         self.__stereoMonoCard = stereoMonoCard
         self.__stereoMonoCard.setVisible(False)
 
@@ -670,7 +1304,7 @@ class VideoStreamingWindow(QWidget):
 
         self.__simulationCard = simulationCard
         self.__simulationCard.setVisible(False)
-        controlsLayout.addWidget(simulationCard)
+        controlsBodyLayout.addWidget(simulationCard)
 
         # FPS control
         fpsCard = QFrame()
@@ -1266,11 +1900,12 @@ class VideoStreamingWindow(QWidget):
 
         self.__calibrationCard = calibrationCard
         self.__calibrationCard.setVisible(False)
-        controlsLayout.addWidget(self.__calibrationCard)
-        controlsLayout.addWidget(fpsCard)
+        controlsBodyLayout.addWidget(self.__calibrationCard)
+        controlsBodyLayout.addWidget(fpsCard)
         
         # Icon playig flag
         self.__isPlaying = False
+        self.__isRecording = False
         self.__uploadProgress = None
 
         # FPS tracking
@@ -1288,6 +1923,9 @@ class VideoStreamingWindow(QWidget):
         self.__startStreamOutBtn.clicked.connect(self.__startStreamOut)
         self.__uploadVideo.clicked.connect(self.__uploadVideoClicked)
         self.__saveSnapshotBtn.clicked.connect(self.__saveVideoOnDevice)
+        self.__recordBtn.clicked.connect(self.__toggleRecording)
+        self.__recordBrowseBtn.clicked.connect(self.__selectRecordPath)
+        self.__recordPathEdit.editingFinished.connect(self.__storeRecordPathFromEdit)
         self.__fileLineEdit.textChanged.connect(self.__updateActiveFileLabel)
         self.__calibSaveBtn.clicked.connect(self.__saveCalibrationProfile)
         self.__calibLoadBtn.clicked.connect(self.__loadCalibrationProfile)
@@ -1303,8 +1941,37 @@ class VideoStreamingWindow(QWidget):
         self.__calibProfileCombo.currentTextChanged.connect(self.__syncCalibrationProfileName)
         self.__qualitySlider.valueChanged.connect(self.__updateQualityLabel)
         self.__qualitySlider.sliderReleased.connect(self.__emitQualityChanged)
+        self.__maxDisparitySlider.valueChanged.connect(self.__updateMaxDisparityLabel)
+        self.__maxDisparitySlider.sliderReleased.connect(self.__emitMaxDisparitiesChanged)
+        self.__confidenceThresholdSlider.valueChanged.connect(self.__updateConfidenceThresholdLabel)
+        self.__confidenceThresholdSlider.sliderReleased.connect(self.__emitConfidenceThresholdChanged)
+        self.__uniquenessRatioSlider.valueChanged.connect(self.__updateUniquenessRatioLabel)
+        self.__uniquenessRatioSlider.sliderReleased.connect(self.__emitUniquenessRatioChanged)
+        
+        self.__ZMinSlider.valueChanged.connect(self.__updateZMinLabel)
+        self.__ZMinSlider.sliderReleased.connect(self.__emitZMinChanged)
+
+        self.__ZMaxSlider.valueChanged.connect(self.__updateZMaxLabel)
+        self.__ZMaxSlider.sliderReleased.connect(self.__emitZMaxChanged)
+
+        self.__depthThresholdSlider.valueChanged.connect(self.__updateDepthThresholdLabel)
+        self.__depthThresholdSlider.sliderReleased.connect(self.__emitDepthThresholdChanged)
+
+        self.__minAgreeingPixelsSlider.valueChanged.connect(self.__updateMinAgreeingPixelsLabel)
+        self.__minAgreeingPixelsSlider.sliderReleased.connect(self.__emitMinAgreeingPixelsChanged)
+
+        self.__colorThresholdSlider.valueChanged.connect(self.__updateColorThresholdLabel)
+        self.__colorThresholdSlider.sliderReleased.connect(self.__emitColorThresholdChanged)
+
+        self.__minDisparitySlider.valueChanged.connect(self.__updateMinDisparityLabel)
+        self.__minDisparitySlider.sliderReleased.connect(self.__emitMinDisparitiesChanged)
+        self.__p1Slider.valueChanged.connect(self.__updateP1Label)
+        self.__p1Slider.sliderReleased.connect(self.__emitP1Changed)
+        self.__p2Slider.valueChanged.connect(self.__updateP2Label)
+        self.__p2Slider.sliderReleased.connect(self.__emitP2Changed)
         
         # Default stream mode
+        self.__syncMinDisparityRange(int(self.__maxDisparitySlider.value()))
         self.__setStreamMode(self.__streamMode, emit_signal=False)
         self.__updateActiveFileLabel(self.__fileLineEdit.text())
         self.__loadCalibrationProfiles()
@@ -1332,6 +1999,130 @@ class VideoStreamingWindow(QWidget):
 
     def __emitQualityChanged(self) -> None:
         self.qualityChanged.emit(int(self.__qualitySlider.value()))
+
+    def __updateMaxDisparityLabel(self, value: int) -> None:
+        step = 16
+        clamped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), int(value)))
+        snapped = int(round(clamped / step) * step)
+        snapped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), snapped))
+        if snapped != value:
+            self.__maxDisparitySlider.blockSignals(True)
+            self.__maxDisparitySlider.setValue(snapped)
+            self.__maxDisparitySlider.blockSignals(False)
+        self.__syncMinDisparityRange(snapped)
+        self.__maxDisparityValueLabel.setText(str(snapped))
+
+    def __emitMaxDisparitiesChanged(self) -> None:
+        step = 16
+        value = int(self.__maxDisparitySlider.value())
+        clamped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), value))
+        snapped = int(round(clamped / step) * step)
+        snapped = max(self.__maxDisparitySlider.minimum(), min(self.__maxDisparitySlider.maximum(), snapped))
+        self.__syncMinDisparityRange(snapped)
+        self.maxDisparitiesChanged.emit(snapped)
+
+    def __updateConfidenceThresholdLabel(self, value: int) -> None:
+        self.__confidenceThresholdValueLabel.setText(str(int(value)))
+
+    def __emitConfidenceThresholdChanged(self) -> None:
+        self.confidenceThresholdChanged.emit(int(self.__confidenceThresholdSlider.value()))
+
+    def __updateUniquenessRatioLabel(self, value: int) -> None:
+        self.__uniquenessRatioValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitUniquenessRatioChanged(self) -> None:
+        self.uniquenessRatioChanged.emit(int(self.__uniquenessRatioSlider.value()))
+
+    def __updateZMinLabel(self, value: int) -> None:
+        self.__ZMinSliderValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitZMinChanged(self) -> None:
+        self.zMinChanged.emit(int(self.__ZMinSlider.value()))
+
+    def __updateZMaxLabel(self, value: int) -> None:
+        self.__ZMaxSliderValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitZMaxChanged(self) -> None:
+        self.zMaxChanged.emit(int(self.__ZMaxSlider.value()))
+
+    def __updateDepthThresholdLabel(self, value: int) -> None:
+        self.__depthThresholdValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitDepthThresholdChanged(self) -> None:
+        self.depthThresholdChanged.emit(int(self.__depthThresholdSlider.value()))
+
+    def __updateMinAgreeingPixelsLabel(self, value: int) -> None:
+        self.__minAgreeingPixelsValueLabel.setText(str(int(value)))
+
+    def __emitMinAgreeingPixelsChanged(self) -> None:
+        self.minAgreeingPixelsChanged.emit(int(self.__minAgreeingPixelsSlider.value()))
+
+    def __updateColorThresholdLabel(self, value: int) -> None:
+        self.__colorThresholdValueLabel.setText(f"{int(value) / 100.0:.2f}")
+
+    def __emitColorThresholdChanged(self) -> None:
+        self.colorThresholdChanged.emit(int(self.__colorThresholdSlider.value()))
+
+    def __updateMinDisparityLabel(self, value: int) -> None:
+        value_int = int(value)
+        value_int = max(self.__minDisparitySlider.minimum(), min(self.__minDisparitySlider.maximum(), value_int))
+        if value_int != value:
+            self.__minDisparitySlider.blockSignals(True)
+            self.__minDisparitySlider.setValue(value_int)
+            self.__minDisparitySlider.blockSignals(False)
+        self.__minDisparityValueLabel.setText(str(value_int))
+
+    def __emitMinDisparitiesChanged(self) -> None:
+        self.minDisparitiesChanged.emit(int(self.__minDisparitySlider.value()))
+
+    def __syncMinDisparityRange(self, max_disp: int) -> None:
+        max_disp = int(max(0, min(256, max_disp)))
+        if self.__minDisparitySlider.maximum() != max_disp:
+            self.__minDisparitySlider.setMaximum(max_disp)
+        if self.__minDisparitySlider.value() > max_disp:
+            self.__minDisparitySlider.setValue(max_disp)
+
+    def __enforceP2GreaterThanP1(self) -> None:
+        p1 = int(self.__p1Slider.value())
+        p2 = int(self.__p2Slider.value())
+        if p2 >= p1:
+            return
+        desired = p1
+        desired = max(self.__p2Slider.minimum(), min(self.__p2Slider.maximum(), desired))
+        if desired == p2:
+            return
+        self.__p2Slider.blockSignals(True)
+        self.__p2Slider.setValue(desired)
+        self.__p2Slider.blockSignals(False)
+        self.__p2ValueLabel.setText(str(int(self.__p2Slider.value())))
+
+    def __updateP1Label(self, value: int) -> None:
+        value_int = int(value)
+        value_int = max(self.__p1Slider.minimum(), min(self.__p1Slider.maximum(), value_int))
+        if value_int != value:
+            self.__p1Slider.blockSignals(True)
+            self.__p1Slider.setValue(value_int)
+            self.__p1Slider.blockSignals(False)
+        self.__p1ValueLabel.setText(str(value_int))
+        self.__enforceP2GreaterThanP1()
+
+    def __emitP1Changed(self) -> None:
+        self.__enforceP2GreaterThanP1()
+        self.p1Changed.emit(int(self.__p1Slider.value()))
+
+    def __updateP2Label(self, value: int) -> None:
+        value_int = int(value)
+        value_int = max(self.__p2Slider.minimum(), min(self.__p2Slider.maximum(), value_int))
+        if value_int != value:
+            self.__p2Slider.blockSignals(True)
+            self.__p2Slider.setValue(value_int)
+            self.__p2Slider.blockSignals(False)
+        self.__p2ValueLabel.setText(str(value_int))
+        self.__enforceP2GreaterThanP1()
+
+    def __emitP2Changed(self) -> None:
+        self.__enforceP2GreaterThanP1()
+        self.p2Changed.emit(int(self.__p2Slider.value()))
 
     def __syncFpsCombos(self, value: str) -> None:
         if not hasattr(self, "_VideoStreamingWindow__fpsCombo") or not hasattr(self, "_VideoStreamingWindow__fpsSel"):
@@ -1716,8 +2507,6 @@ class VideoStreamingWindow(QWidget):
             }
             """
         )
-        if global_pos is not None:
-            self.__controlsPopout.move(global_pos - QPoint(80, 20))
 
         popoutLayout = QVBoxLayout(self.__controlsPopout)
         popoutLayout.setContentsMargins(12, 12, 12, 12)
@@ -1731,15 +2520,59 @@ class VideoStreamingWindow(QWidget):
         self.__controlsPopout.finished.connect(lambda _=None: self.__dockControls())
         self.__controlsPopout.show()
         self.__resizeControlsPopout()
+        self.__placeDialogOnScreen(self.__controlsPopout, global_pos)
+        self.__controlsPopout.raise_()
+        self.__controlsPopout.activateWindow()
 
 
     def __resizeControlsPopout(self) -> None:
         if self.__controlsPopout is None or not self.__controlsPopout.isVisible():
             return
-        self.__controlsTab.adjustSize()
-        self.__controlsPopout.adjustSize()
-        self.__controlsPopout.resize(self.__controlsPopout.sizeHint())
-        self.__controlsPopout.updateGeometry()
+        # Do not call adjustSize() here.
+        # This method is invoked during mode switches (e.g. calibration) while the
+        # popout is visible. Calling adjustSize() forces the dialog back to its
+        # minimum sizeHint, which feels like the window "keeps shrinking" while
+        # the user is trying to resize it.
+        hint = self.__controlsPopout.sizeHint()
+        current = self.__controlsPopout.size()
+        target_w = max(current.width(), hint.width(), self.__controlsPopout.minimumWidth())
+        target_h = max(current.height(), hint.height(), self.__controlsPopout.minimumHeight())
+        if target_w != current.width() or target_h != current.height():
+            self.__controlsPopout.resize(target_w, target_h)
+            self.__controlsPopout.updateGeometry()
+
+
+    def __placeDialogOnScreen(self, dlg: QDialog, anchor_pos: QPoint | None) -> None:
+        if dlg is None:
+            return
+        if anchor_pos is None:
+            anchor_pos = QCursor.pos()
+
+        screen = QApplication.screenAt(anchor_pos)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        avail = screen.availableGeometry()
+        w = dlg.width() if dlg.width() > 0 else dlg.sizeHint().width()
+        h = dlg.height() if dlg.height() > 0 else dlg.sizeHint().height()
+        w = max(w, dlg.minimumWidth())
+        h = max(h, dlg.minimumHeight())
+
+        # Prefer positioning ABOVE the click point so it "comes up" (higher).
+        desired_x = anchor_pos.x() - (w // 2)
+        desired_y = anchor_pos.y() - h - 24
+
+        margin = 12
+        x_min = avail.left() + margin
+        y_min = avail.top() + margin
+        x_max = avail.right() - w - margin
+        y_max = avail.bottom() - h - margin
+
+        x = max(x_min, min(desired_x, x_max))
+        y = max(y_min, min(desired_y, y_max))
+        dlg.move(QPoint(int(x), int(y)))
 
 
     def __dockControls(self) -> None:
@@ -1786,6 +2619,50 @@ class VideoStreamingWindow(QWidget):
         videoName : str = os.path.basename(self.__fileLineEdit.text())
         logging.info(f"Saving video on device: {videoName}")
         self.saveVideoOnDevice.emit(videoName)
+
+    def __selectRecordPath(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select Recording Folder")
+        if not path:
+            return
+        self.__recordPathEdit.setText(path)
+        self.__storeRecordPath(path)
+
+
+    def __storeRecordPathFromEdit(self) -> None:
+        self.__storeRecordPath(self.__recordPathEdit.text().strip())
+
+
+    def __storeRecordPath(self, path: str) -> None:
+        if not path:
+            return
+        self.__recordPath = path
+        self.__settings.setValue("recordPath", path)
+
+
+    def __toggleRecording(self) -> None:
+        if not self.__isRecording:
+            path = self.__recordPathEdit.text().strip()
+            if not path:
+                self.__selectRecordPath()
+                path = self.__recordPathEdit.text().strip()
+            if not path:
+                logging.info("Recording path not set; recording cancelled")
+                return
+            self.__storeRecordPath(path)
+            self.__recordBtn.setText("REC ON")
+            self.__recordBtn.setToolTip("Stop recording")
+            self.__isRecording = True
+        else:
+            self.__recordBtn.setText("REC")
+            self.__recordBtn.setToolTip("Start recording to disk")
+            self.__isRecording = False
+        
+        setting : int = -1
+        if self.__buttonSel.current() == "Record Video":
+            setting = 0
+        elif self.__buttonSel.current() == "Record Point Cloud":
+            setting = 1
+        self.recordingStateChanged.emit(self.__isRecording, self.__recordPath, setting)
     
 
     def __startStreamOut(self) -> None:
@@ -1910,6 +2787,32 @@ class VideoStreamingWindow(QWidget):
         quality = params.get("quality")
         if isinstance(quality, int):
             self.__qualitySlider.setValue(quality)
+        max_disparity = params.get("max_disparity", params.get("maxDisparity", params.get("num_disparities", params.get("disparities"))))
+        if isinstance(max_disparity, int) and hasattr(self, "_VideoStreamingWindow__maxDisparitySlider"):
+            self.__maxDisparitySlider.setValue(max_disparity)
+            self.__syncMinDisparityRange(max_disparity)
+        min_disp = params.get("min_disparity", params.get("minDisparity"))
+        if isinstance(min_disp, int) and hasattr(self, "_VideoStreamingWindow__minDisparitySlider"):
+            self.__minDisparitySlider.setValue(min_disp)
+        p1 = params.get("p1", params.get("P1"))
+        if isinstance(p1, int) and hasattr(self, "_VideoStreamingWindow__p1Slider"):
+            self.__p1Slider.setValue(p1)
+        p2 = params.get("p2", params.get("P2"))
+        if isinstance(p2, int) and hasattr(self, "_VideoStreamingWindow__p2Slider"):
+            self.__p2Slider.setValue(p2)
+
+        confidence = params.get("confidence_threshold", params.get("confidenceThreshold"))
+        if isinstance(confidence, int) and hasattr(self, "_VideoStreamingWindow__confidenceThresholdSlider"):
+            self.__confidenceThresholdSlider.setValue(max(0, min(65535, confidence)))
+
+        uniqueness_ratio = params.get("uniqueness_ratio", params.get("uniquenessRatio", params.get("uniqueness")))
+        if isinstance(uniqueness_ratio, (int, float)) and hasattr(self, "_VideoStreamingWindow__uniquenessRatioSlider"):
+            # VPI uniqueness is a float [0, 1]; slider is 0-100
+            if isinstance(uniqueness_ratio, float) and 0.0 <= uniqueness_ratio <= 1.0:
+                self.__uniquenessRatioSlider.setValue(int(uniqueness_ratio * 100))
+            elif isinstance(uniqueness_ratio, int):
+                self.__uniquenessRatioSlider.setValue(uniqueness_ratio)
+
         fps = params.get("fps")
         if isinstance(fps, int):
             self.updateFpsDisplay(str(fps))
@@ -1919,16 +2822,75 @@ class VideoStreamingWindow(QWidget):
         stereo_mono_mode = params.get("stereo_mono_mode")
         if isinstance(stereo_mono_mode, str):
             self.__setStereoMonoMode(stereo_mono_mode)
+        z_min = params.get("z_min", params.get("zMin"))
+        if isinstance(z_min, (int, float)) and hasattr(self, "_VideoStreamingWindow__ZMinSlider"):
+            self.__ZMinSlider.setValue(max(0, min(5000, int(float(z_min) * 100))))
+        z_max = params.get("z_max", params.get("zMax"))
+        if isinstance(z_max, (int, float)) and hasattr(self, "_VideoStreamingWindow__ZMaxSlider"):
+            self.__ZMaxSlider.setValue(max(0, min(5000, int(float(z_max) * 100))))
+
+        depth_threshold = params.get("depth_threshold", params.get("depthThreshold"))
+        if isinstance(depth_threshold, (int, float)) and hasattr(self, "_VideoStreamingWindow__depthThresholdSlider"):
+            self.__depthThresholdSlider.setValue(max(0, min(1000, int(float(depth_threshold) * 100))))
+
+        min_agreeing_pixels = params.get("min_agreeing_pixels", params.get("minAgreeingPixels"))
+        if isinstance(min_agreeing_pixels, int) and hasattr(self, "_VideoStreamingWindow__minAgreeingPixelsSlider"):
+            self.__minAgreeingPixelsSlider.setValue(max(0, min(50, min_agreeing_pixels)))
+
+        color_threshold = params.get("color_threshold", params.get("colorThreshold"))
+        if isinstance(color_threshold, (int, float)) and hasattr(self, "_VideoStreamingWindow__colorThresholdSlider"):
+            self.__colorThresholdSlider.setValue(max(0, min(1000, int(float(color_threshold) * 100))))
+
+        render_mode = params.get("disparity_render_mode")
+        if isinstance(render_mode, str) and render_mode in ("depth", "disparity"):
+            self.__setDisparityRenderMode(render_mode, emit_signal=False)
 
 
     # ------------------------------------------------------------------
-    # Call this when a new frame arrives (numpy array BGR)
+    # Call this when a new frame arrives (disparity frame)
     # ------------------------------------------------------------------
     def updateFrame(self, frame: np.ndarray, GyroData:tuple[int, int, int]=None):
         if frame is None:
             return
 
-        rgbImage = frame   # Already RGB
+        rgbImage = frame
+        if frame.ndim == 2:
+            gray = frame
+            if gray.dtype != np.uint8:
+                finite = np.isfinite(gray)
+                if not np.any(finite):
+                    return
+                min_v = float(np.min(gray[finite]))
+                max_v = float(np.max(gray[finite]))
+                if max_v <= min_v:
+                    gray = np.zeros_like(gray, dtype=np.uint8)
+                else:
+                    gray = ((gray - min_v) * (255.0 / (max_v - min_v))).astype(np.uint8)
+            rgbImage = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        elif frame.ndim == 3 and frame.shape[2] == 1:
+            gray = frame[:, :, 0]
+            if gray.dtype != np.uint8:
+                finite = np.isfinite(gray)
+                if not np.any(finite):
+                    return
+                min_v = float(np.min(gray[finite]))
+                max_v = float(np.max(gray[finite]))
+                if max_v <= min_v:
+                    gray = np.zeros_like(gray, dtype=np.uint8)
+                else:
+                    gray = ((gray - min_v) * (255.0 / (max_v - min_v))).astype(np.uint8)
+            rgbImage = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        elif frame.ndim == 3 and frame.shape[2] == 3:
+            rgbImage = frame   # Already RGB
+        else:
+            logging.warning("Unsupported frame shape for render: %s", getattr(frame, "shape", None))
+            return
+
+        # QImage expects a tightly packed buffer or the correct stride (bytesPerLine).
+        # If we assume `ch*w` for a non-contiguous array, the image can appear tiled/repeated.
+        if rgbImage.dtype != np.uint8:
+            rgbImage = rgbImage.astype(np.uint8, copy=False)
+        rgbImage = np.ascontiguousarray(rgbImage)
         self.__mutex.lock()
         try:
             # ------------------------------------------------------
@@ -1939,9 +2901,11 @@ class VideoStreamingWindow(QWidget):
 
             # Convert ndarray → QImage
             h, w, ch = rgbImage.shape
-            bytesPerLine = ch * w
+            bytesPerLine = int(rgbImage.strides[0])
 
-            qImg = QImage(rgbImage.data, w, h, bytesPerLine, QImage.Format.Format_RGB888)
+            # Detach from the numpy buffer; otherwise subsequent frames can overwrite the same memory
+            # while Qt is still rendering/scaling, causing "overlaid" / corrupted output.
+            qImg = QImage(rgbImage.data, w, h, bytesPerLine, QImage.Format.Format_RGB888).copy()
             if qImg.isNull():
                 logging.info("QImage is null")
                 return
@@ -1991,6 +2955,13 @@ class VideoStreamingWindow(QWidget):
         self.updateFrame(stacked)
 
 
+    def updateDisparityFrame(self, frame: np.ndarray) -> None:
+        """Render disparity frame (already RGB)."""
+        if frame is None:
+            return
+        self.updateFrame(frame)
+
+
     def __setStreamMode(self, mode: str, emit_signal: bool = True) -> None:
         if mode not in self.__streamModeButtons:
             return
@@ -2014,6 +2985,16 @@ class VideoStreamingWindow(QWidget):
                 self.__toggleCalibrationMode(emit_signal=emit_signal)
         if emit_signal and mode == "training":
             self.simulationSourceSelected.emit()
+        self.__resizeControlsPopout()
+
+    def __setDisparityRenderMode(self, mode: str, emit_signal: bool = True) -> None:
+        if mode not in self.__disparityRenderButtons:
+            return
+        self.__disparityRenderMode = mode
+        for key, btn in self.__disparityRenderButtons.items():
+            btn.setChecked(key == mode)
+        if emit_signal:
+            self.disparityRenderModeChanged.emit(mode)
         self.__resizeControlsPopout()
 
 
@@ -2101,5 +3082,7 @@ class VideoStreamingWindow(QWidget):
             return
         self.__uploadProgress.reset()
         self.__uploadProgress = None
+
+
 
 
