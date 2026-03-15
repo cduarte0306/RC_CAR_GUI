@@ -182,6 +182,7 @@ class VideoStreamer:
 
         self.__receiveThread = Thread(target=self.__streamThread, daemon=True)
         self.__sendThread = None  # Create on demand
+        self.__3dTimeoutThread = None  # Create on demand
 
         # Circular buffer
         self.__frameBufferMono = CircularBuffer(100)
@@ -218,11 +219,13 @@ class VideoStreamer:
         # 3D point cloud visualizer (Open3D). The C++ side owns a dedicated render thread so
         # VideoStreamer can safely push point data from its worker thread.
         self.__renderer = None
+        self.__3dTimeoutThread = None
+        self.__rendererOpened = False
+        self.__timeoutCounter : int = 0
         try:
             self.__renderer = rc_car_cpp.Renderer3D()
             # Match the PyQt dark theme (#0b111c)
             self.__renderer.set_clear_color(0.043, 0.067, 0.110, 1.0)
-            self.__renderer.enable_visualizer_window(True)
         except Exception as e:
             logging.warning(f"3D visualizer disabled (failed to start): {e}")
             self.__renderer = None
@@ -472,7 +475,7 @@ class VideoStreamer:
         self.__streamOutCanRun = state
         if self.__streamOutCanRun:
             logging.info("Starting stream out thread")
-            self.__sendThread = Thread(target=self.__streamOutThread, daemon=True)
+            self.__sendThread = Thread(target=self.__streamOutThread, daemon=True)            
             self.__sendThread.start()
 
 
@@ -556,6 +559,20 @@ class VideoStreamer:
             self.sendFrameSignal.emit(packet)
 
         self.__sendFrameID += 1
+        
+
+    def __3dTimeoutThreadFunc(self) -> None:
+        while True:
+            self.__timeoutCounter += 1
+
+            if self.__timeoutCounter >= 10:
+                self.__timeoutCounter = 0
+                if self.__renderer is not None:
+                    self.__renderer.enable_visualizer_window(False)
+                    self.__rendererOpened = False
+                    break
+            time.sleep(0.1)
+
 
     def __streamOutThread(self) -> None:
         self.startingVideoTransmission.emit()
@@ -1146,56 +1163,65 @@ class VideoStreamer:
                 # else:
                 #     self.__recordDisparity(frame)
 
+        # Renderer state 
         if self.__renderer is not None:
-            # points3d = _points3d
-            x = points3d[:, :, 0]
-            y = points3d[:, :, 1]
-            finite_xyz = np.isfinite(x) & np.isfinite(y) & np.isfinite(Z)
-            pc_mask = (
-                base_valid
-                & finite_xyz
-                & (Z > 0.01)
-                & (Z < 5.0)
-                # & (dist < 25.0)
-                & (np.abs(x) < 12.0)
-                & (np.abs(y) < 8.0)
-            )
-            pts_xyz = points3d[pc_mask]
-            if pts_xyz.size == 0:
-                pc_mask = base_valid & finite_xyz
+            if not self.__rendererOpened:
+                # Open the window
+                self.__renderer.enable_visualizer_window(True)
+                self.__rendererOpened = True
+                self.__3dTimeoutThread = Thread(target=self.__3dTimeoutThreadFunc, daemon=True)
+                self.__3dTimeoutThread.start()
+            else:
+                self.__timeoutCounter = 0  # Reset timeout counter on each new frame
+                # points3d = _points3d
+                x = points3d[:, :, 0]
+                y = points3d[:, :, 1]
+                finite_xyz = np.isfinite(x) & np.isfinite(y) & np.isfinite(Z)
+                pc_mask = (
+                    base_valid
+                    & finite_xyz
+                    & (Z > 0.01)
+                    & (Z < 5.0)
+                    & (np.abs(x) < 12.0)
+                    & (np.abs(y) < 8.0)
+                )
                 pts_xyz = points3d[pc_mask]
+                if pts_xyz.size == 0:
+                    pc_mask = base_valid & finite_xyz
+                    pts_xyz = points3d[pc_mask]
 
-            pts_xyz = pts_xyz.astype(np.float32, copy=False)
-            pts_xyz = np.ascontiguousarray(pts_xyz)
+                pts_xyz = pts_xyz.astype(np.float32, copy=False)
+                pts_xyz = np.ascontiguousarray(pts_xyz)
 
-            # Extract matching color data if available
-            pts_rgb = None
-            if has_color:
-                pts_rgb = color3d[pc_mask]
+                # Extract matching color data if available
+                pts_rgb = None
+                if has_color:
+                    pts_rgb = color3d[pc_mask]
 
-            n_points = int(pts_xyz.shape[0])
-
-            max_points = 200_000
-            if n_points > max_points:
-                step = max(1, n_points // max_points)
-                pts_xyz = pts_xyz[::step]
-                if pts_rgb is not None:
-                    pts_rgb = pts_rgb[::step]
                 n_points = int(pts_xyz.shape[0])
 
-            if n_points > 0:
-                pc_bytes = pts_xyz.view(np.uint8)
-                if pts_rgb is not None:
-                    # Convert float32 RGB (0-255) to uint32 to match C++ PointRGB struct
-                    pts_rgb = np.clip(pts_rgb, 0, 255).astype(np.uint32)
-                    pts_rgb = np.ascontiguousarray(pts_rgb)
-                    rgb_bytes = pts_rgb.view(np.uint8)
-                    self.__renderer.setPointCloudColorData(pc_bytes, rgb_bytes, n_points)
+                max_points = 200_000
+                if n_points > max_points:
+                    step = max(1, n_points // max_points)
+                    pts_xyz = pts_xyz[::step]
+                    if pts_rgb is not None:
+                        pts_rgb = pts_rgb[::step]
+                    n_points = int(pts_xyz.shape[0])
+
+                if n_points > 0:
+                    pc_bytes = pts_xyz.view(np.uint8)
+                    if pts_rgb is not None:
+                        # Convert float32 RGB (0-255) to uint32 to match C++ PointRGB struct
+                        pts_rgb = np.clip(pts_rgb, 0, 255).astype(np.uint32)
+                        pts_rgb = np.ascontiguousarray(pts_rgb)
+                        rgb_bytes = pts_rgb.view(np.uint8)
+                        self.__renderer.setPointCloudColorData(pc_bytes, rgb_bytes, n_points)
+                    else:
+                        self.__renderer.setPointCloudData(pc_bytes, n_points)
                 else:
-                    self.__renderer.setPointCloudData(pc_bytes, n_points)
-            else:
-                # If no point cloud frames received in over a period of time  
-                pass
+                    # If no point cloud frames received in over a period of time  
+                    pass
+
 
         self.__frameBufferStereoMono.push((display_frame, (stereoDatas.gyroX, stereoDatas.gyroY, stereoDatas.gyroZ)))
         return True
