@@ -158,6 +158,17 @@ class BackendIface(QThread):
         self.__loadParamsSignal.connect(self.__handleParamsReply)
         
         self.setDisparityRenderMode("depth")
+        
+        self.__threadCanRun = True
+        
+        
+    def __del__(self):
+        
+        # This will be called when the object is garbage collected
+        self.__threadCanRun = False
+        self.__pingShutdownEvent.set()
+        self.__ping_thread.join()
+        self.__disconnectTimerObj.join()
 
 
     def getVideoOutAdapterIp(self) -> str:
@@ -1027,7 +1038,7 @@ class BackendIface(QThread):
         """
         Main UI interface thread
         """
-        while True:
+        while self.__threadCanRun:
             frame = self.__videoStreamer.getFrameIn()
             if frame is not None:
                 self.__clearTimers()
