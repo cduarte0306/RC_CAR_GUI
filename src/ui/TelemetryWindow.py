@@ -595,6 +595,44 @@ class VehicleTelemetryWindow(QWidget):
             sensorsRow.addWidget(self.gyroVis, stretch=1)
         sensorsLayout.addLayout(sensorsRow)
 
+        # Temperature readouts
+        tempRow = QHBoxLayout()
+        tempRow.setSpacing(16)
+        temp_label_style = "color: #9ba7b4; font-size: 12px; font-weight: 600;"
+        temp_value_style = "color: #e8ecf3; font-size: 14px; font-weight: 700;"
+
+        cpuTempCol = QVBoxLayout()
+        cpuTempCol.setSpacing(2)
+        cpuTempTitle = QLabel("CPU")
+        cpuTempTitle.setStyleSheet(temp_label_style)
+        self.cpuTempLabel = QLabel("-- °C")
+        self.cpuTempLabel.setStyleSheet(temp_value_style)
+        cpuTempCol.addWidget(cpuTempTitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        cpuTempCol.addWidget(self.cpuTempLabel, alignment=Qt.AlignmentFlag.AlignCenter)
+        tempRow.addLayout(cpuTempCol)
+
+        gpuTempCol = QVBoxLayout()
+        gpuTempCol.setSpacing(2)
+        gpuTempTitle = QLabel("GPU")
+        gpuTempTitle.setStyleSheet(temp_label_style)
+        self.gpuTempLabel = QLabel("-- °C")
+        self.gpuTempLabel.setStyleSheet(temp_value_style)
+        gpuTempCol.addWidget(gpuTempTitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        gpuTempCol.addWidget(self.gpuTempLabel, alignment=Qt.AlignmentFlag.AlignCenter)
+        tempRow.addLayout(gpuTempCol)
+
+        socTempCol = QVBoxLayout()
+        socTempCol.setSpacing(2)
+        socTempTitle = QLabel("SoC")
+        socTempTitle.setStyleSheet(temp_label_style)
+        self.socTempLabel = QLabel("-- °C")
+        self.socTempLabel.setStyleSheet(temp_value_style)
+        socTempCol.addWidget(socTempTitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        socTempCol.addWidget(self.socTempLabel, alignment=Qt.AlignmentFlag.AlignCenter)
+        tempRow.addLayout(socTempCol)
+
+        sensorsLayout.addLayout(tempRow)
+
         # status row under sensors
         self.info_label = QLabel("Live telemetry ready")
         self.info_label.setStyleSheet("color: #9ba7b4; font-size: 12px;")
@@ -625,7 +663,7 @@ class VehicleTelemetryWindow(QWidget):
         mapTitleRow.addWidget(mapTitle)
         mapTitleRow.addStretch()
         mapCardLayout.addLayout(mapTitleRow)
-        mapCardLayout.addWidget(mapSubtitle)
+        mapCardLayout.addWidget(mapSubtitle)        
 
         self.traversal = TrajectoryMap()
         mapCardLayout.addWidget(self.traversal, stretch=1)
@@ -699,6 +737,19 @@ class VehicleTelemetryWindow(QWidget):
             if hasattr(self, "odometer"):
                 safe_spd = max(0.0, min(spd, self.odometer.max_speed))
                 self.odometer.animateTo(int(safe_spd))
+        except Exception:
+            pass
+
+        try:
+            cpu_temp = outer.get("CPU_TEMP", outer.get("cpuTemp"))
+            gpu_temp = outer.get("GPU_TEMP", outer.get("gpuTemp"))
+            soc_temp = outer.get("SOC_TEMP", outer.get("socTemp"))
+            if cpu_temp is not None:
+                self.cpuTempLabel.setText(f"{float(cpu_temp):.1f} °C")
+            if gpu_temp is not None:
+                self.gpuTempLabel.setText(f"{float(gpu_temp):.1f} °C")
+            if soc_temp is not None:
+                self.socTempLabel.setText(f"{float(soc_temp):.1f} °C")
         except Exception:
             pass
 

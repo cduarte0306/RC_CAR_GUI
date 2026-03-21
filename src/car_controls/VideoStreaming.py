@@ -986,6 +986,8 @@ class VideoStreamer:
             or payload_u8.size == (rows * cols * 3)
             or payload_u8.size == (rows * cols * 4)
             or (channels == 1 and cols > 0 and (cols % 3 == 0) and payload_u8.size == (rows * cols))
+            or (channels == 2 and cols > 0 and (cols % 3 == 0) and payload_u8.size == (rows * cols))
+
         )
 
         if looks_like_image:
@@ -1026,10 +1028,18 @@ class VideoStreamer:
             # Case C: Misreported as 1-channel with cols == bytes_per_row (packed RGB bytes).
             # This yields a "3 tiled grayscale copies" look in the UI if not corrected.
             if channels == 1 and (cols % 3 == 0) and raw_buf.size == rows * cols:
-                pix_w = cols // 3
-                frame_rgb = raw_buf.reshape(rows, pix_w, 3)
-                self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
-                self.__frameBufferMono.push(frame_rgb)
+                if channels != 1:
+                    pix_w = cols // 3
+                    frame_rgb = raw_buf.reshape(rows, pix_w, 3)
+                    self.__record_rgb_frame_with_q(frame_rgb, stereoDatas.Q)
+                    self.__frameBufferMono.push(frame_rgb)
+                
+                elif channels == 1:
+                    frame_rgb = raw_buf.reshape(rows, cols, 1)
+                    self.__frameBufferMono.push(frame_rgb)
+                    # cv2.imshow("Received Mono Image Payload", raw_buf.reshape(rows, cols))
+                    # cv2.waitKey(1)
+                
                 return True
 
             # Unknown raw image layout.
