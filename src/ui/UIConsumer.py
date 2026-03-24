@@ -54,6 +54,7 @@ class BackendIface(QThread):
 
     CONTROLLER_PORT = 65000
     STREAM_PORT     = 5005
+    STREAM_OUT_PORT = 5006
     TELEMETRY_PORT  = 6000
 
     def __init__(self):
@@ -94,7 +95,7 @@ class BackendIface(QThread):
         # Create outbound adapter first (no receive callback)
         # self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter("streamOut" , (BackendIface.STREAM_PORT, "192.168.1.10"), self.__videoReceivedEthCallback, recvBuffSize=65507)    
         self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter(
-            "streamOut", (BackendIface.STREAM_PORT, "192.168.1.10", "192.168.1.1"), recvBuffSize=65507 ,recvCallback=self.__videoReceivedEthCallback
+            "streamOut", (BackendIface.STREAM_OUT_PORT, "192.168.1.10", "192.168.1.1"), recvBuffSize=65507 ,recvCallback=self.__videoReceivedEthCallback
         )
 
         # Create buffers and streamer before wiring the inbound adapter callback
