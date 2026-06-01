@@ -60,7 +60,7 @@ renderer = cpp_extensions.create_renderer3d(clear_color)
 ### Network Communication
 UDP adapters use callback-driven reception:
 ```python
-adapter = network_manager.openAdapter("name", (port, ip), recv_callback)
+adapter = network_manager.openUDPAdapter("name", (port, ip), recv_callback)
 ```
 Leave `ip` empty for receive-only binding. Data flows through `CircularBuffer` to UI via Qt signals.
 

@@ -9,7 +9,7 @@ import types
 
 from utils.utilities import Signal
 from .BaseClass import BaseClass
-from .CommandBus import CommandBus, Command, commands
+from .CommandBus import CommandBus, MotorCommands
 
 
 class Controller(BaseClass):
@@ -17,7 +17,7 @@ class Controller(BaseClass):
     controllerBatteryLevel = Signal(int)  # Emitted when battery level changes
     controllerDisconnected = Signal()  # Emitted when controller is disconnected
     
-    def __init__( self, CommandBus: CommandBus ) -> None:
+    def __init__( self ) -> None:
         super().__init__()  # Initialize parent class
 
         self.__ds = self.__create_dualsense()
@@ -34,7 +34,7 @@ class Controller(BaseClass):
         self.__shutdownEvent.clear()
 
         # Command dispatch
-        self.__bus = CommandBus
+        self.__bus = CommandBus.getInstance()
 
         # Signals
         self.controllerFound = Signal()  # Emitted when a controller is found
@@ -184,8 +184,11 @@ class Controller(BaseClass):
         if abs(self.__last_joystick_x - x) > 2:
             self.__last_joystick_x = x
 
-        self.__bus.submit(Command(commands.CMD_STEER.value, x))
-        self.__bus.submit(Command(commands.CMD_FWD_DIR.value, y))
+        steer_cmd = MotorCommands()
+        steer_cmd.ModuleSteer(x)
+
+        fwd_cmd = MotorCommands()
+        fwd_cmd.ModuleFwdDir(y)
 
 
     def __r_joystick( self, x : int, y : int ) -> None:

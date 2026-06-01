@@ -2,21 +2,34 @@ import socket
 import struct
 from threading import Lock, Event
 import logging
+import select
+
+import asyncio
+import dataclasses
+import itertools
 
 from utils.utilities import Signal
 
 
 class UDP:
 
-    def __init__(self, port: int, host: str = "", timeout: float | None = None, log_timeouts: bool = False) -> None:
+    def __init__(
+        self,
+        port: int,
+        host: str = "",
+        timeout: float | None = None,
+        log_timeouts: bool = False,
+        enable_broadcast: bool = False,
+    ) -> None:
         self.__socket_mutex = Lock()
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.__socket.setblocking(False)
         self.__server_ip: str = host if host else ""
+        self.__replyingSrvAddr: tuple[str, int] | None = None
 
-        # Runtime-configurable timeout behavior; default is blocking (no timeouts/log spam)
+        # Runtime-configurable timeout behavior for sync/async receive methods.
         self.__timeout: float | None = timeout
         self.__log_timeouts: bool = log_timeouts
-        self.__socket.settimeout(self.__timeout)
 
         # Try to increase the OS receive buffer to reduce chance of ENOBUFS/10040
         try:
@@ -26,29 +39,36 @@ class UDP:
         except Exception:
             logging.debug("Could not set SO_RCVBUF on UDP socket; continuing with defaults")
 
+        # Enable broadcast only when explicitly requested.
+        self.__broadcast_enabled = False
+        self.set_broadcast(enable_broadcast)
+
         self.__shutdown_event = Event()
 
         # Exposed signals
         self.deviceFound = Signal()
         
         self.__port = port
-
-    
-    @staticmethod
-    def searchHostName() -> str | None:
-        """
-        Hostname search service
-        """
-        try:
-            ip = socket.gethostbyname("rc-car-machine.local")
-            if len(ip) > 0:
-                return ip
-        except:
-            return None
         
-        return None
-    
-    
+    def __del__(self):
+        self.shutdown()
+
+
+    def set_broadcast(self, enabled: bool) -> bool:
+        """Enable or disable UDP broadcast sending on this socket."""
+        try:
+            self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1 if enabled else 0)
+            self.__broadcast_enabled = enabled
+            logging.info("UDP broadcast %s", "enabled" if enabled else "disabled")
+            return True
+        except Exception as e:
+            logging.error("Failed to set UDP broadcast mode: %s", e)
+            return False
+        
+    def getSrcAddr(self) -> tuple[str, int] | None:
+        """ Get the address of the server this client is communicating with """
+        return self.__replyingSrvAddr
+
     def setServerIP(self, ip: str) -> None:
         """
         Set the server IP address
@@ -59,18 +79,23 @@ class UDP:
         self.__server_ip = ip
 
 
-    def bindSocket(self, port, ip : str = "0.0.0.0") -> bool:
+    def bindSocket(self, port: int, ip: str = "0.0.0.0") -> bool:
         """
         Bind the socket
 
         Args:
-            ip (_type_): _description_
-            port (_type_): _description_
+            ip (str): IP address to bind to
+            port (int): Port number to bind to
 
         Returns:
-            bool: _description_
+            bool: True if binding was successful, False otherwise
         """
-        self.__socket.bind((ip, port))
+        try:
+            self.__socket.bind((ip, port))
+            return True
+        except Exception as e:
+            logging.error("Failed to bind UDP socket: %s", e)
+            return False
 
 
     def set_timeout(self, timeout: float) -> None:
@@ -81,7 +106,6 @@ class UDP:
             timeout (float): Timeout in seconds. Use None for blocking mode.
         """
         self.__timeout = timeout
-        self.__socket.settimeout(self.__timeout)
     
 
     def send(self, data: bytes, ip: str = None) -> bool:
@@ -100,10 +124,12 @@ class UDP:
         dest_ip = ip if ip else self.__server_ip
         if not dest_ip:
             logging.debug("Server IP not set. Cannot send data.")
-            return True
+            return False
 
         try:
             self.__socket.sendto(data, (dest_ip, self.__port))
+            if self.__broadcast_enabled:
+                self.__replyingSrvAddr = (dest_ip, self.__port)
         except Exception as e:
             logging.error("Failed to send UDP data: %s", e)
             return False
@@ -121,14 +147,22 @@ class UDP:
         try:
             # Clamp requested size to a sensible UDP maximum
             recv_size = min(size, 65535)
+            ready, _, _ = select.select([self.__socket], [], [], self.__timeout)
+            if not ready:
+                if self.__log_timeouts:
+                    logging.warning("UDP.receive_data timeout")
+                else:
+                    logging.debug("UDP.receive_data timeout (suppressed)")
+                return None
             data, addr = self.__socket.recvfrom(recv_size)  # no flags on Windows
+            port = addr[1]
+            if (port == 65000):
+                print(f"UDP.receive_data got data from {addr}")
+                print(f"UDP.receive_data data length: {len(data)}")
+                print(f"UDP.receive_data data (hex): {data}")
+            if self.__broadcast_enabled:  # Only update replying server address if we're in broadcast mode
+                self.__replyingSrvAddr = addr
             return data
-        except socket.timeout as e:
-            if self.__log_timeouts:
-                logging.warning("UDP.receive_data timeout: %s", e)
-            else:
-                logging.debug("UDP.receive_data timeout (suppressed)")
-            return None
         except OSError as e:
             if self.__shutdown_event.is_set():
                 return None
@@ -138,6 +172,36 @@ class UDP:
             return None
         except Exception as e:
             logging.error("UDP.receive_data unexpected exception: %s", e)
+            return None
+
+
+    async def receive_data_async(self, size: int = 65507) -> bytes | None:
+        """Receive a datagram using asyncio."""
+        try:
+            recv_size = min(size, 65535)
+            loop = asyncio.get_running_loop()
+            if self.__timeout is not None:
+                data, _ = await asyncio.wait_for(
+                    loop.sock_recvfrom(self.__socket, recv_size), timeout=self.__timeout
+                )
+            else:
+                data, addr = await loop.sock_recvfrom(self.__socket, recv_size)
+            if self.__broadcast_enabled:  # Only update replying server address if we're in broadcast mode
+                self.__replyingSrvAddr = addr
+            return data
+        except TimeoutError:
+            if self.__log_timeouts:
+                logging.warning("UDP.receive_data_async timeout")
+            else:
+                logging.debug("UDP.receive_data_async timeout (suppressed)")
+            return None
+        except OSError as e:
+            if self.__shutdown_event.is_set():
+                return None
+            logging.warning("UDP.receive_data_async exception: %s", e)
+            return None
+        except Exception as e:
+            logging.error("UDP.receive_data_async unexpected exception: %s", e)
             return None
 
 

@@ -12,19 +12,70 @@ from PyQt6.QtWidgets import (
 
 from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent
 
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QThread
 
+import utils.utilities as utils
+
+from threading import Event
+import logging
+from enum import Enum, auto
 
 class FirmwareUpdateWindow(QWidget):
+    
+    class ReplyId(Enum):
+        VERIFY_RESULT   = auto()
+        PROGRESS_UPDATE = auto()
+        INSTALL_RESULT  = auto()
+    
     """Front-end only firmware upgrade panel.
 
     Intended to be embedded in the main window (for example added to a
     stacked layout or shown in a dialog). No backend logic is included —
-    the UI emits `installRequested` when the user triggers an install.
+    the UI emits `initUpdate` when the user triggers an install.
     """
+    initUpdate          = pyqtSignal(int, str)    # Initiate firmware update with given file path
+    sendFileChunk       = pyqtSignal(int, bytes)  # Emit a chunk of the firmware file for transfer to the device
+    verifyFile          = pyqtSignal(int, object) # Verify the firmware file before starting the update (emits file path, size, and hash for verification by backend)
+    cmdInstall          = pyqtSignal(int, )       # Command to start the installation process after file transfer is complete
+    requestInstallState = pyqtSignal(int, )       # Request current installation state (for UI sync on startup or after reconnecting to device)
+   
+    class ReplyWorker(QThread):      
+        doNext = pyqtSignal(int) # Signal to trigger processing of the next reply in the buffer (used to wake the thread when a new reply arrives)
+          
+        def __init__(self, replyCircBuff : utils.CircularBuffer =None) -> None:
+            super().__init__()
+            self._replyCircBuff = replyCircBuff
+            self._canRun = True
 
-    installRequested = pyqtSignal(str)
+        def kill(self):
+            self._canRun = False
+            self._replyCircBuff.flush() # Unblock the thread if it's waiting on an empty buffer
+            
+        def OnVerifyResult(self, data):
+            logging.info(f"Received VERIFY_RESULT reply: {data}")
 
+        def OnProgressUpdate(self, data):
+            logging.info(f"Received PROGRESS_UPDATE reply: {data}")
+            pass
+        
+        def OnInstallResult(self, data):
+            logging.info(f"Received INSTALL_RESULT reply: {data}")
+            
+        def run(self) -> None:
+            logging.info(f"Starting ReplyWorker thread...")
+            while self._canRun:
+                reply = self._replyCircBuff.read()
+                
+                if reply is None:
+                    continue
+                
+                id, data = reply
+                
+                match id:
+                    case FirmwareUpdateWindow.ReplyId.VERIFY_RESULT: self.OnVerifyResult(data)
+                        # Handle verification result (e.g. update UI, show error if verification failed)
+                
+            logging.info(f"Exiting ReplyWorker thread...")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -40,6 +91,10 @@ class FirmwareUpdateWindow(QWidget):
         self._build_ui()
 
         self._connect_signals()
+        
+        self._replyCircBuff = utils.CircularBuffer(10) # Buffer for incoming device replies related to firmware update process
+        
+        self._procReplyThread = self.ReplyWorker(self._replyCircBuff)
 
 
     def _build_ui(self) -> None:
@@ -221,6 +276,9 @@ class FirmwareUpdateWindow(QWidget):
         self._progress.setValue(0)
         self._set_status("Preparing update…")
         self._timer.start()
+        self._procReplyThread.start() # Start thread to process incoming device replies related to firmware update process
+        logging.info(f"Emitting initUpdate signal with file path: {self._file_path}")
+        self.initUpdate.emit(self._file_path) # Emit signal to trigger backend update process (
 
 
     def _on_cancel(self) -> None:
@@ -256,6 +314,17 @@ class FirmwareUpdateWindow(QWidget):
         """Update the status label text."""
 
         self._status_label.setText(text)
+        
+        
+    def onDeviceReply(self, id : ReplyId, reply: dict) -> None:
+        """
+        Device reply state machine handling for firmware update process. This should be connected to the backend signal that emits device replies related to firmware update commands, allowing the UI to react to progress updates, verification results, and installation outcomes.
+
+        Args:
+            reply (dict): _description_
+        """
+        self._replyCircBuff.push((id, reply))
+        pass
 
 
     def dragEnterEvent(self, ev: QDragEnterEvent) -> None:
@@ -267,7 +336,7 @@ class FirmwareUpdateWindow(QWidget):
             return
 
         path = urls[0].toLocalFile()
-        if path.lower().endswith((".bin", ".hex", ".uf2", ".zip")):
+        if path.lower().endswith((".swu",)):
             ev.acceptProposedAction()
         else:
             ev.ignore()

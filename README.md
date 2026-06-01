@@ -12,7 +12,7 @@ GUI for RC car telemetry and controls with high-performance C++ extensions and r
 ## Prerequisites
 
 ### Python Dependencies
-- Python 3.10+ with development headers
+- Python 3.14+ with development headers
 - PyQt6
 - opencv-python
 - pydualsense

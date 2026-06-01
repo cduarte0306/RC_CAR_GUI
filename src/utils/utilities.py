@@ -66,6 +66,19 @@ class CircularBuffer:
         self.__size = size
         self.__list : list = [None] * size
         self.__lock = threading.Lock()
+        self.__notEmptySignal = threading.Condition(self.__lock)
+        
+        
+    def flush(self):
+        """
+        Flush the buffer by resetting head and tail pointers.
+        """
+        with self.__lock:
+            self.__head = 0
+            self.__tail = 0
+            
+            # Notify any waiting threads that the buffer is now empty
+            self.__notEmptySignal.notify_all()
         
 
     def push(self, val):
@@ -76,8 +89,11 @@ class CircularBuffer:
             val (_type_): _description_
         """
         with self.__lock:
+            isEmptyBeforePush = self.__head == self.__tail            
             self.__list[self.__head] = val
             self.__head = (self.__head + 1) % self.__size
+            if isEmptyBeforePush:
+                self.__notEmptySignal.notify_all()
 
     
     def empty(self) -> bool:
@@ -94,16 +110,23 @@ class CircularBuffer:
         return cond
     
 
-    def read(self) -> None:
+    def read(self, timeout=None) -> None:
         """
-        Read and pop from the buffer
+        Read and pop from the buffer. (Blocking)
+
+        Args:
+            timeout (float | None): Maximum time to wait for an item. None means wait indefinitely.
 
         Returns:
-            int | None: _description_
+            int | None: The next item from the buffer, or None if timeout occurs.
         """
         with self.__lock:
             if self.__head == self.__tail:
-                return None
+                if timeout is None:
+                    return None
+                else:
+                    if not self.__notEmptySignal.wait(timeout):
+                        return None
             
             val = self.__list[self.__tail]
             self.__tail = (self.__tail + 1) % self.__size
@@ -128,11 +151,6 @@ class Signal:
         with self._lock:
             if callback not in self._callbacks:
                 self._callbacks.append(callback)
-                
-    
-    def setName(self, name: str) -> None:
-        """Set a human-readable name for this signal (used in logging)."""
-        self._name = name
 
 
     def disconnect(self, callback):
@@ -176,4 +194,9 @@ class Emitter:
         print(f"Setting value to: {new_value}")
         # Emit the signal when the value changes
         self.value_changed.emit(new_value)
+        
+        
+class FSM:
+    def __init__(self):
+        self.state = "initial"
     

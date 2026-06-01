@@ -286,7 +286,8 @@ class ClickableLabel(QLabel):
         if callable(self._callback):
             try:
                 self._callback()
-            except Exception:
+            except Exception as e:
+                logging.error("Error in ClickableLabel callback: %s", e)
                 pass
         super().mousePressEvent(event)
 
@@ -407,7 +408,7 @@ class DeviceTile(QWidget):
         self._updateAdapterButtonText()
 
 
-    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+    def _applySelectedAdapterIp(self, adapter_ip: str) -> None:
         self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
         self._updateAdapterButtonText()
 
@@ -479,7 +480,7 @@ class DeviceTile(QWidget):
         except Exception:
             adapter_ip = "0.0.0.0"
 
-        self.setSelectedAdapterIp(adapter_ip)
+        self._applySelectedAdapterIp(adapter_ip)
         if callable(self._adapter_selected_callback):
             try:
                 self._adapter_selected_callback(adapter_ip)
@@ -594,14 +595,14 @@ class WelcomeWindow(QWidget):
     def configureAdapterPicker(self, adapter_provider, selected_adapter_ip: str, adapter_selected_callback=None) -> None:
         self._adapter_provider = adapter_provider
         self._adapter_selected_callback = adapter_selected_callback
-        self.setSelectedAdapterIp(selected_adapter_ip)
+        self._applySelectedAdapterIp(selected_adapter_ip)
 
 
-    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+    def _applySelectedAdapterIp(self, adapter_ip: str) -> None:
         self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
         for tile in self._device_tiles:
             try:
-                tile.setSelectedAdapterIp(self._selected_adapter_ip)
+                tile._applySelectedAdapterIp(self._selected_adapter_ip)
             except Exception:
                 pass
 
@@ -654,7 +655,7 @@ class WelcomeWindow(QWidget):
 
 
     def _onAdapterSelected(self, adapter_ip: str) -> None:
-        self.setSelectedAdapterIp(adapter_ip)
+        self._applySelectedAdapterIp(adapter_ip)
         if callable(self._adapter_selected_callback):
             try:
                 self._adapter_selected_callback(adapter_ip)
@@ -847,12 +848,6 @@ class MainWindow(QMainWindow):
         
         # import UI consumer
         self.__consumer = BackendIface()
-        self.__adapter_ip = self.__consumer.getVideoOutAdapterIp()
-        self.__welcomeWindow.configureAdapterPicker(
-            self.__listAdapterOptions,
-            self.__adapter_ip,
-            self.__onAdapterIpSelected,
-        )
 
         # Disable side buttons until a device is connected
         self.side.btnTelem.setEnabled(False)
@@ -975,6 +970,11 @@ class MainWindow(QMainWindow):
         self.__streamWindow.deviceVideoLoadRequested.connect(self.__consumer.loadDeviceVideo)
         self.__streamWindow.deviceVideoDeleteRequested.connect(self.__consumer.deleteDeviceVideo)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+        
+        # Firmware update signals (Window <-> Backend)
+        # self.__fwWindow.initUpdate.connect(None) # Placeholder
+        # self.__fwWindow.sendFileChunk.connect(None)
+        # self.__fwWindow.verifyFile.connect(None)
 
 
     def __routeTlm(self, raw_payload : bytes) -> None:
@@ -1100,6 +1100,7 @@ class MainWindow(QMainWindow):
 
     def __onDeviceDiscovered(self, ip: str) -> None:
         """Add a discovered device to the welcome window with hover tooltip and click-to-connect."""
+        logging.info(f"Discovered device at {ip}")
         # Use a car icon from icons/ folder
         icon_path = "icons/rc-car.png"
         self.__welcomeWindow.addDevice(icon_path, ip, connect_callback=lambda: self.__consumer.connectToDevice(ip))
@@ -1109,6 +1110,7 @@ class MainWindow(QMainWindow):
 
     def __onDeviceConnected(self, ip: str) -> None:
         """Enable the side panel buttons once a connection to the device is initiated."""
+        logging.info(f"Connected to device at {ip}")
         self.side.btnTelem.setEnabled(True)
         self.side.btnVideo.setEnabled(True)
         self.side.btnFw.setEnabled(True)
