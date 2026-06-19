@@ -16,7 +16,6 @@ class UDP:
     def __init__(
         self,
         port: int,
-        host: str = "",
         timeout: float | None = None,
         log_timeouts: bool = False,
         enable_broadcast: bool = False,
@@ -24,7 +23,6 @@ class UDP:
         self.__socket_mutex = Lock()
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__socket.setblocking(False)
-        self.__server_ip: str = host if host else ""
         self.__replyingSrvAddr: tuple[str, int] | None = None
 
         # Runtime-configurable timeout behavior for sync/async receive methods.
@@ -48,7 +46,7 @@ class UDP:
         # Exposed signals
         self.deviceFound = Signal()
         
-        self.__port = port
+        self.__dstPort = port
         
     def __del__(self):
         self.shutdown()
@@ -69,29 +67,23 @@ class UDP:
         """ Get the address of the server this client is communicating with """
         return self.__replyingSrvAddr
 
-    def setServerIP(self, ip: str) -> None:
-        """
-        Set the server IP address
 
-        Args:
-            ip (str): Server IP address
-        """
-        self.__server_ip = ip
-
-
-    def bindSocket(self, port: int, ip: str = "0.0.0.0") -> bool:
+    def bindSocket(self, srcPort: int, ip: str = "0.0.0.0") -> bool:
         """
         Bind the socket
 
         Args:
             ip (str): IP address to bind to
-            port (int): Port number to bind to
+            srcPort (int): Source port number to bind to (use 0 for ephemeral port assignment)
 
         Returns:
             bool: True if binding was successful, False otherwise
         """
         try:
-            self.__socket.bind((ip, port))
+            self.__socket.bind((ip, srcPort))
+            # Get the actual assigned port, especially important for ephemeral (port 0)
+            assigned_ip, assigned_port = self.__socket.getsockname()
+            logging.info("UDP socket bound to %s:%d; Dest port: %d", assigned_ip, assigned_port, self.__dstPort)
             return True
         except Exception as e:
             logging.error("Failed to bind UDP socket: %s", e)
@@ -121,15 +113,15 @@ class UDP:
                 - FALSE: Failed to transmit data
         """
         # Allow callers to omit `ip` and use configured server IP from constructor
-        dest_ip = ip if ip else self.__server_ip
+        dest_ip = ip
         if not dest_ip:
             logging.debug("Server IP not set. Cannot send data.")
             return False
 
         try:
-            self.__socket.sendto(data, (dest_ip, self.__port))
+            self.__socket.sendto(data, (dest_ip, self.__dstPort))
             if self.__broadcast_enabled:
-                self.__replyingSrvAddr = (dest_ip, self.__port)
+                self.__replyingSrvAddr = (dest_ip, self.__dstPort)
         except Exception as e:
             logging.error("Failed to send UDP data: %s", e)
             return False
@@ -155,13 +147,9 @@ class UDP:
                     logging.debug("UDP.receive_data timeout (suppressed)")
                 return None
             data, addr = self.__socket.recvfrom(recv_size)  # no flags on Windows
-            port = addr[1]
-            if (port == 65000):
-                print(f"UDP.receive_data got data from {addr}")
-                print(f"UDP.receive_data data length: {len(data)}")
-                print(f"UDP.receive_data data (hex): {data}")
-            if self.__broadcast_enabled:  # Only update replying server address if we're in broadcast mode
-                self.__replyingSrvAddr = addr
+            # Always record the source address so callers can identify the sender
+            # (e.g. to reject self-originated datagrams on a shared TX/RX port).
+            self.__replyingSrvAddr = addr
             return data
         except OSError as e:
             if self.__shutdown_event.is_set():
@@ -173,37 +161,6 @@ class UDP:
         except Exception as e:
             logging.error("UDP.receive_data unexpected exception: %s", e)
             return None
-
-
-    async def receive_data_async(self, size: int = 65507) -> bytes | None:
-        """Receive a datagram using asyncio."""
-        try:
-            recv_size = min(size, 65535)
-            loop = asyncio.get_running_loop()
-            if self.__timeout is not None:
-                data, _ = await asyncio.wait_for(
-                    loop.sock_recvfrom(self.__socket, recv_size), timeout=self.__timeout
-                )
-            else:
-                data, addr = await loop.sock_recvfrom(self.__socket, recv_size)
-            if self.__broadcast_enabled:  # Only update replying server address if we're in broadcast mode
-                self.__replyingSrvAddr = addr
-            return data
-        except TimeoutError:
-            if self.__log_timeouts:
-                logging.warning("UDP.receive_data_async timeout")
-            else:
-                logging.debug("UDP.receive_data_async timeout (suppressed)")
-            return None
-        except OSError as e:
-            if self.__shutdown_event.is_set():
-                return None
-            logging.warning("UDP.receive_data_async exception: %s", e)
-            return None
-        except Exception as e:
-            logging.error("UDP.receive_data_async unexpected exception: %s", e)
-            return None
-
 
     def shutdown(self) -> None:
         """

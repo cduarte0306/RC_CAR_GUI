@@ -5,7 +5,7 @@ from utils.utilities import CircularBuffer
 from car_controls.VideoStreaming import VideoStreamer, FrameHeader
 from car_controls.controller import Controller
 from car_controls.CommandBus import (CamStreamSelectionModes,
-                                     CommandBus, Command, CameraCommand,
+                                     CommandBus, Command, CameraCommand, RcCommands,
                                      Reply,
                                      MotorCommands, UpdaterCommand, val_type_t)
 from network.NetworkManager import NetworkManager
@@ -84,8 +84,14 @@ class BackendIface(QThread):
         
         self.__networkMgr = NetworkManager()
 
-        # Open telemtry adaptrer
-        _ = NetworkManager.getUDPAdapter(Defines.TELEMETRY_PORT, self.__telemetryReceivedCallback)
+        # Telemetry is inbound-only, so listen on all local interfaces rather
+        # than tying reception to whichever NIC discovery selected.
+        self._tlmSockFd = NetworkManager.getUDPAdapter(
+            Defines.TELEMETRY_PORT,
+            OnRx=self.__telemetryReceivedCallback,
+            recvBuffSize=1024,
+            name="Telemetry"
+        )
 
         # controllerAdapter.deviceFound.connect(self.__deviceFound)
         self.__devicesPool : list  = []
@@ -98,6 +104,7 @@ class BackendIface(QThread):
         # Connect signals
         # Forward discovered host IPs to the UI with the IP string
         # self.__networkMgr.hostDiscovered.connect(lambda ip: self.deviceConnected.emit(ip))
+        self.__networkMgr.dataReceived.connect(lambda: self.__clearTimers)
         self.__networkMgr.hostDiscovered.connect(lambda ip: self.deviceDiscovered.emit(ip))
         self.__videoStreamer.sendFrameSignal.connect(lambda pkt: self.__videoStreamOutThread(pkt))
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
@@ -114,7 +121,7 @@ class BackendIface(QThread):
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
         # Background workers for ping and disconnect watchdog
-        self.__threadPool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="backend-iface")
+        self.__threadPool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="backend-iface")
         self.__pingFuture = None
         self.__disconnectFuture = None
         
@@ -237,10 +244,8 @@ class BackendIface(QThread):
         Args:
             data (bytes): Telemetry data
         """
-        if self.__looks_like_video_packet(data):
-            self.__videoReceivedCallback(data)
-            return
-        # For now, just log telemetry size
+        # Port 6000 is reserved for telemetry; do not attempt to reinterpret
+        # these datagrams as video fragments.
         logging.debug("Received telemetry data (%d bytes)", len(data))
         self.__tlmBuffer.push(data)
         
@@ -487,10 +492,9 @@ class BackendIface(QThread):
         
         extraCommandPayload = json.dumps(extraCommand).encode("utf-8")
         
-        cam_cmd = CameraCommand()
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource, payload=extraCommandPayload)
+            CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource, payload=extraCommandPayload)
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
 
@@ -500,10 +504,9 @@ class BackendIface(QThread):
         """Set the camera source to either simulation or physical camera."""
         logging.info("Requested simulation source mode")
         
-        cam_cmd = CameraCommand()
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
+            CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
 
@@ -514,11 +517,10 @@ class BackendIface(QThread):
         if not params:
             return
         logging.info("Stereo calibration params requested: %s", params)
-        cam_cmd = CameraCommand()
         params_payload = json.dumps(params).encode("utf-8")
         # Emit camera save video command to the controller bus, with appended payload
         try:
-            cam_cmd.ModuleCalibrationWriteParams(params_payload)
+            CameraCommand().ModuleCalibrationWriteParams(params_payload)
         except Exception as exc:
             logging.error("Failed to enqueue save video command: %s", exc)
 
@@ -535,13 +537,12 @@ class BackendIface(QThread):
 
         mode = "calibration"
         logging.info("Setting camera mode to: %s", mode)
-        cam_cmd = CameraCommand()
         # Emit camera save video command to the controller bus, with appended payload
         try:
             if mode == "normal":
-                cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource)
+                CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource)
             else:
-                cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
+                CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
         except Exception as exc:
             logging.error("Failed to enqueue save video command: %s", exc)
 
@@ -650,6 +651,13 @@ class BackendIface(QThread):
         self.__connected_ip = ip
         logging.info(f"Connecting to device at {ip}")
         self.__networkMgr.StartConnection(ip, self.__OnDeviceConnected)
+        
+        # Start disconnect timer
+        if self.__disconnectFuture is None or self.__disconnectFuture.done():
+            self.__disconnectFuture = self.__threadPool.submit(self.__check_disconnect)
+            
+        if self.__pingFuture is None or self.__pingFuture.done():
+            self.__pingFuture = self.__threadPool.submit(self.__ping_loop)
         return
         # Potential place to reconfigure adapters or start sessions
         self.__videoStreameEthAdapter.setServerIP(ip)
@@ -920,7 +928,8 @@ class BackendIface(QThread):
             if self.__connected_ip:
                 try:
                     # Ping over both command buses
-                    self.__commandBus.submit(Command(commands.CMD_NOOP.value, 0))
+                    rcCommands = RcCommands()
+                    rcCommands.ping()
                 except Exception as exc:
                     logging.error("Failed to enqueue ping command: %s", exc)
             time.sleep(2)

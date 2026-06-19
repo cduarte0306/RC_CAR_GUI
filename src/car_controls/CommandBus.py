@@ -318,6 +318,27 @@ class Command(ctypes.Structure):
 
         CommandBus.getInstance().submit(self)
 
+class RcCommands(Command):
+    """
+    Base RC Car command
+
+    Args:
+        Command (type): The base command class for RC Car commands.
+
+    Returns:
+        type: The initialized RC Car command instance.
+    """
+    def __init__(self, *args, socket=None, **kwargs):
+        super().__init__(*args, socket=socket, **kwargs)
+        
+        # Initialize module fields
+        self.moduleId = ModuleIDs.NullModule.value
+
+    def ping(self, replyCallback: callable = None) -> None:
+        """Example ping command to test connectivity and reply handling."""
+        logging.debug("Sending ping command")
+        self.dispatchCommand(cmd=0, value=0, payload=b'', replyCallback=replyCallback)
+
 class CameraCommand(Command):
     # IDs pinned to host enum order in `.vscode/test2`.
     CmdStartStream            = 0

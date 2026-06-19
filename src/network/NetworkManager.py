@@ -24,15 +24,17 @@ class IfaceId(Enum):
 @dataclass
 class SockReq:
     callback   : callable
-    port       : int
     bufferSize : int
     sockDesc   : int
-
+    dstPort    : int = 0
+    srcPort    : int = 0
+    name       : str = ""
 
 _socketPool : dict = {}
 _registeredSockMap : dict  = {}
 _socketList : list[tuple[Socket, Socket]] = []
-_portToSocket : dict[int, list[tuple[Socket, Socket]]] = {}  # Maps socket descriptor to the socket name
+_dstPortToSocket : dict[int, list[tuple[Socket, Socket]]] = {}  # Maps socket descriptor to the socket name
+_srcPortToSocket : dict[int, list[tuple[Socket, Socket]]] = {}  # Maps socket descriptor to the socket name
 _IfaceIps : dict[int, str] = {}  # Local interface IP 
 _RemoteIps : dict[int, str] = {} # Remote interface IP
 _IfaceIps[IfaceId.WlanIface.value] = None
@@ -75,6 +77,7 @@ class NetworkErr(Exception):
 
 class NetworkManager:
     hostDiscovered = Signal(str)
+    dataReceived = Signal()
     
     def __init__(self):
         self.__threadPool = ThreadPoolExecutor(max_workers=10)
@@ -85,125 +88,60 @@ class NetworkManager:
         self.__shutdownEvent       = Event()
         self.__wlanDiscoveredEvent = Event()
         self.__wlanQueueDrainedEvent = Event()
-        self.__ethDicoveredEvent   = Event()
-        
-    def __openWlanSocketQueueHndlr(
-        self
-    ) -> None:
-        """
-        WLAN socket creation queue handler to open sockets while discovery is still in progress
-        Returns:
-            None
-        """
-        while not self.__shutdownEvent.is_set():
-            # Wait until WLAN discovery is complete before processing queued requests.
-            if not self.__wlanDiscoveredEvent.wait(timeout=0.5):
-                continue
-
-            try:
-                req : SockReq = _wlanSockOpenReqQueue.get(timeout=0.25)
-            except Empty:
-                # Queue is drained for now.
-                self.__wlanQueueDrainedEvent.set()
-                continue
-            except Exception:
-                continue
-
-            self.__wlanQueueDrainedEvent.clear()
-
-            try:
-                wlan_ip = _IfaceIps[IfaceId.WlanIface.value]
-                remote_wlan_ip = _RemoteIps[IfaceId.WlanIface.value]
-                if wlan_ip is None or remote_wlan_ip is None:
-                    # Discovery state changed; put request back and retry later.
-                    _wlanSockOpenReqQueue.put(req)
-                    continue
-
-                wlan = NetworkManager.openUDPAdapter(
-                    (req.port, wlan_ip, remote_wlan_ip),
-                    recvCallback=req.callback,
-                    recvBuffSize=req.bufferSize,
-                )
-
-                if req.sockDesc >= len(_socketList):
-                    logging.error("Invalid WLAN socket descriptor %s for port %s", req.sockDesc, req.port)
-                    continue
-
-                iface_list = _socketList[req.sockDesc]
-                iface_list[IfaceId.WlanIface.value] = wlan
-            except Exception as exc:
-                logging.error("Failed to open queued WLAN UDP adapter on port %s: %s", req.port, exc)
-            finally:
-                try:
-                    _wlanSockOpenReqQueue.task_done()
-                except Exception:
-                    pass
-                
-                
-    def __openEthSocketQueueHndlr(
-        self
-    ) -> None:
-        """
-        ETH socket creation queue handler to open sockets while discovery is still in progress
-        Returns:
-            None
-        """
-        while not self.__shutdownEvent.is_set():
-            self.__ethDicoveredEvent.wait()
-            req : SockReq = _ethSockOpenReqQueue.get()
+        self.__ethDiscoveredEvent  = Event()         
+        self.__ethCreated : bool = False
 
     def __searchHostWlan(self):
         """
         Host IP discovery service
         """
         ip = None
-        
         adapters = NetworkManager.determineNicIp()
         wifi_info = adapters["wifi"]
         _IfaceIps[IfaceId.WlanIface.value] = wifi_info[0] if wifi_info is not None else None
         while ip is None:
             ip = NetworkManager.searchHostName()
-        logging.info("IP found at %s", ip)
-        
+        logging.info("RC Car found at %s", ip)
         _RemoteIps[IfaceId.WlanIface.value] = ip
         self.__wlanDiscoveredEvent.set()
-
-        # Create queued WLAN sockets in this discovery thread before notifying listeners.
-        while not self.__shutdownEvent.is_set():
-            try:
-                req : SockReq = _wlanSockOpenReqQueue.get_nowait()
-            except Empty:
-                break
-
-            try:
-                wlan_ip = _IfaceIps[IfaceId.WlanIface.value]
-                remote_wlan_ip = _RemoteIps[IfaceId.WlanIface.value]
-                if wlan_ip is None or remote_wlan_ip is None:
-                    _wlanSockOpenReqQueue.put(req)
-                    break
-
-                wlan = NetworkManager.openUDPAdapter(
-                    (req.port, wlan_ip, remote_wlan_ip),
-                    recvCallback=req.callback,
-                    recvBuffSize=req.bufferSize,
-                )
-
-                if req.sockDesc < len(_socketList):
-                    iface_list = _socketList[req.sockDesc]
-                    iface_list[IfaceId.WlanIface.value] = wlan
-                else:
-                    logging.error("Invalid WLAN socket descriptor %s for port %s", req.sockDesc, req.port)
-            except Exception as exc:
-                logging.error("Failed to open queued WLAN UDP adapter on port %s: %s", req.port, exc)
-            finally:
-                try:
-                    _wlanSockOpenReqQueue.task_done()
-                except Exception:
-                    pass
-
-        self.__wlanQueueDrainedEvent.set()
-        
         self.hostDiscovered.emit(ip)
+
+        # # Create queued WLAN sockets in this discovery thread before notifying listeners.
+        # while not self.__shutdownEvent.is_set():
+        #     try:
+        #         req : SockReq = _wlanSockOpenReqQueue.get()
+        #     except Empty:
+        #         continue
+
+        #     try:
+        #         wlan_ip = _IfaceIps[IfaceId.WlanIface.value]
+        #         remote_wlan_ip = _RemoteIps[IfaceId.WlanIface.value]
+        #         if wlan_ip is None or remote_wlan_ip is None:
+        #             _wlanSockOpenReqQueue.put(req)
+        #             continue
+
+        #         wlan = NetworkManager.openUDPAdapter(
+        #             (req.port, wlan_ip, remote_wlan_ip), 
+        #             recvCallback=req.callback,
+        #             recvBuffSize=req.bufferSize,
+        #         )
+
+        #         name = " " + req.name if req.name else ""
+        #         if req.sockDesc < len(_socketList):
+        #             iface_list = _socketList[req.sockDesc]
+        #             iface_list[IfaceId.WlanIface.value] = wlan
+        #             logging.info("Opened WLAN UDP adapter'%s' for port %s with descriptor %s", name, req.port, req.sockDesc)
+        #         else:
+        #             logging.error("Invalid WLAN socket descriptor %s for port %s", req.sockDesc, req.port)
+        #     except Exception as exc:
+        #         logging.error("Failed to open queued WLAN UDP adapter '%s' on port %s: %s", name, req.port, exc)
+        #     finally:
+        #         try:
+        #             _wlanSockOpenReqQueue.task_done()
+        #         except Exception:
+        #             pass
+
+        # self.__wlanQueueDrainedEvent.set()
 
     def startDiscovery(self) -> None:
         """
@@ -214,16 +152,10 @@ class NetworkManager:
             self.__wlanQueueDrainedEvent.clear()
             # Add to thread pool and start the thread
             self.__searchHostWlanFuture = self.__threadPool.submit(self.__searchHostWlan)
-
-        if self.__ethHandshakeFuture is None or self.__ethHandshakeFuture.done():
-            self.__ethHandshakeFuture = self.__threadPool.submit(self.__ethHandshakeHandler)
-
-        if self.__openEthQueueFuture is None or self.__openEthQueueFuture.done():
-            self.__openEthQueueFuture = self.__threadPool.submit(self.__openEthSocketQueueHndlr)
             
-        if self.__openWlanQueueFuture is None or self.__openWlanQueueFuture.done():
-            self.__openWlanQueueFuture = self.__threadPool.submit(self.__openWlanSocketQueueHndlr)
-            
+        # Now we start the handshake for eth using the newly discovered eth IP
+        # self.__ethHandshakeFuture = self.__threadPool.submit(self.__ethHandshakeHandler)
+
     def StartConnection(self, hostIP : str, onDeviceConnected: callable = None) -> None:
         import ipaddress
         if not isinstance(hostIP, str):
@@ -245,91 +177,119 @@ class NetworkManager:
         Args:
             hostIP (str): The IP address of the host to perform the handshake with
         """
+        import json
         logging.info("Starting WLAN handshake with host at %s", hostIP)
         replyReceivedEvent = Event()
         sock : UDP = None
+        ethIp : str = None
+        hostNetMask : str = None
+        ethInfo : tuple[str, str] = None
         def handleHandshakeMessageRx(data: bytes):
+            self.dataReceived.emit()
+            nonlocal ethInfo
             message = data.decode("utf-8").strip()
+            message = json.loads(message.strip())
+            # Decode json handshake message and extract host IP if present
             replyingSrvrAddr = sock.getSrcAddr()
 
-            if message != "HANDSHAKE_ACK":
+            if message["message"] != "HANDSHAKE_ACK":
                 logging.debug("Ignoring non-ack handshake message '%s' from %s", message, replyingSrvrAddr)
                 return
-            logging.info("Received WLAN handshake ACK from %s", replyingSrvrAddr)
+            
+            # Decode the ethernet IP
+            ethInfo = message
+            logging.info("Received WLAN handshake ACK from %s:\r\n%s", replyingSrvrAddr, json.dumps(ethInfo, indent=4))
             replyReceivedEvent.set()
-        
+
         # Open port at wlan IP
         sock = NetworkManager.openUDPAdapter(
-            (Defines.HANDSHAKE_PORT, _IfaceIps[IfaceId.WlanIface.value], hostIP),
-            recvBuffSize=1024,
+            (_IfaceIps[IfaceId.WlanIface.value], Defines.HANDSHAKE_PORT),
             recvCallback=handleHandshakeMessageRx
         )
-        
+
         sock.set_timeout(5.0)
         sock.set_broadcast(False)
-        
+
         while not self.__shutdownEvent.is_set() and not replyReceivedEvent.is_set():
             # Transmit handshake
             sock.send("HANDSHAKE-SEND".encode("utf-8"), hostIP)
             # Wait a bit for ACK before sending the next probe.
             replyReceivedEvent.wait(1.0)
-            
+
+        wlanAckReceived = replyReceivedEvent.is_set()
         sock.shutdown()
-            
-        logging.info("WLAN handshake with host at %s completed with ACK: %s", hostIP, replyReceivedEvent.is_set())
-        if replyReceivedEvent.is_set() and onDeviceConnected is not None:
+        replyReceivedEvent.clear()        
+        self.__ethHandshakeHandler(ethInfo)
+
+        logging.info("WLAN handshake with host at %s completed with ACK: %s", hostIP, wlanAckReceived)
+        if wlanAckReceived and onDeviceConnected is not None:
             onDeviceConnected(hostIP)
-            
-    def __ethHandshakeHandler(self):
+
+    def __ethHandshakeHandler(self, ethInfo) -> None:
         """
         Ethernet handshake service
         """
-        ethIp : str = None
+        if self.__ethCreated:
+            logging.info("Ethernet handshake already completed; skipping...")
+            return
         sock : UDP = None
         replyingSrvrAddr : tuple[str, int] | None = None
         handshakeReceived = Event()
-        
+
         def handleHandshakeMessageRx(data: bytes):
+            self.dataReceived.emit()
             nonlocal replyingSrvrAddr
             message = data.decode("utf-8").strip()
             replyingSrvrAddr = sock.getSrcAddr()
-            if replyingSrvrAddr == ethIp:
-                logging.debug("Received handshake message from self at %s; ignoring", replyingSrvrAddr)
+            if replyingSrvrAddr is None:
+                logging.error("Failed to get source address from handshake message; ignoring")
                 return
             if message != "HANDSHAKE_ACK":
                 logging.debug("Ignoring non-ack handshake message '%s' from %s", message, replyingSrvrAddr)
                 return
             logging.info("Received ETH handshake ACK from %s", replyingSrvrAddr)
             handshakeReceived.set()
-            
+        
+        logging.info("Starting Ethernet handshake with host IP %s, netmask %s", ethInfo["eth_ip"], ethInfo.get("net_mask"))
+        
+        # Check if host adapter is compatible with local Ethernet adapter before starting the handshake
         ethIp : str = None
+        netmask : str = None
         while ethIp is None and not self.__shutdownEvent.is_set():
             adapters = NetworkManager.determineNicIp()
-            ethIp, _ = adapters["ethernet"]
+            ethIp, netmask = adapters["ethernet"]
             if ethIp is None:
                 logging.info("Ethernet adapter not found; retrying in 5 seconds...")
                 self.__shutdownEvent.wait(5)
                 
-        logging.info("Ethernet adapter found with IP %s; starting handshake listener", ethIp)
-                
-        # Extract first three octets of the Ethernet IP to determine the subnet (e.g. "192.168.1.")
-        subnet = ".".join(ethIp.split(".")[:3]) + ".255"
+        # Check if netmask of local eth adapter is compatible with host IP subnet before starting the handshake
+        while not NetworkManager.isIpInSubnet(ethInfo["eth_ip"], f"{ethIp}/{netmask}") and not self.__shutdownEvent.is_set():
+            logging.info("Host Ethernet IP %s is not in the same subnet as local Ethernet adapter IP %s with netmask %s; retrying in 5 seconds...", ethInfo["eth_ip"], ethIp, netmask)
+            self.__shutdownEvent.wait(5)
+
+        _IfaceIps[IfaceId.EthIface.value] = ethIp
+
+        logging.info("Ethernet adapter found with IP %s, netmask %s; starting handshake listener", ethIp, netmask)
 
         # Open adapter at ethernet
         sock = NetworkManager.openUDPAdapter(
-            (Defines.HANDSHAKE_PORT, ethIp, subnet),
+            (ethIp, Defines.HANDSHAKE_PORT),
             recvCallback=handleHandshakeMessageRx,
             recvBuffSize=1024
         )
-        
-        sock.set_broadcast(True)
+
         sock.set_timeout(5.0)
-    
         logging.info("Ethernet handshake listener started on %s:%s", ethIp, Defines.HANDSHAKE_PORT)
-        
+
+        ethHostIp = ethInfo.get("eth_ip") if ethInfo is not None else None
+        if ethHostIp is None:
+            logging.info("Ethernet handshake stopped due to shutdown before host IP was set")
+            sock.shutdown()
+            return
+
         while not self.__shutdownEvent.is_set() and not handshakeReceived.is_set():
             # Transmit handshake
-            sock.send("HANDSHAKE-SEND".encode("utf-8"), subnet)
+            sock.send("HANDSHAKE-SEND".encode("utf-8"), ethHostIp)
             # Wait a bit for ACK before sending the next probe.
             handshakeReceived.wait(1.0)
 
@@ -342,26 +302,29 @@ class NetworkManager:
             logging.warning("Ethernet handshake ended without a valid ACK source")
             sock.shutdown()
             return
-            
-        
-        # Handle eth queue requests
+
+        # Persist the discovered peer, then retire the handshake listener so it
+        # does not keep consuming and logging additional ACK packets.
         _RemoteIps[IfaceId.EthIface.value] = replyingSrvrAddr[0]  # Store the replying server's IP as the Ethernet host IP for routing purposes
+        sock.shutdown()
         self.__ethDiscoveredEvent.set()
-        while not self.__shutdownEvent.is_set():
+        while not self.__shutdownEvent.is_set() and not _ethSockOpenReqQueue.empty():
             req : SockReq = _ethSockOpenReqQueue.get()        
             if req == None:
                 continue
 
             eth  = NetworkManager.openUDPAdapter(
-                (req.port, ethIp, replyingSrvrAddr[0]),  
+                (ethIp, req.dstPort, req.srcPort),
                 recvBuffSize=req.bufferSize, 
                 recvCallback=req.callback
             )
-            
+
+            logging.info("Opened Ethernet UDP adapter for port %s with descriptor %s", req.dstPort, req.sockDesc)
             # Retrieve the socket entry from the descriptor map
             iFaces : tuple = _socketList[req.sockDesc]
             iFaces[IfaceId.EthIface.value] = eth
             
+        self.__ethCreated = True
 
     @staticmethod
     def isIpInSubnet(ip: str, subnet: str) -> bool:
@@ -458,25 +421,34 @@ class NetworkManager:
         Opens an adapter to the specified IP
 
         Args:
-            ip (str): _description_
-            adapter (tuple): _description_
+            adapterInfo (tuple): Adapter information tuple (local_bind_ip, port) or (local_bind_ip, port, src_port)
+            recvCallback (callable, optional): Callback function for received data
+            recvBuffSize (int, optional): Receive buffer size for the UDP socket. Defaults to 4096.
 
         Returns:
-            bool: _description_
+            UDP: The created UDP adapter
         """
         # NetworkManager.__validateRecvCallback(recvCallback)
 
         dstPort = 0
         ipHost = ""
         ipLocal = ""
-
-        if len(adapterInfo) != 3:
-            raise NetworkErr("Invalid adapter info tuple; expected (port, host_ip, local_bind_ip)")
         
-        # Pos 1: Destination port
-        # Pos 2: Local IP
-        # Pos 3: Host IP
-        dstPort, localIp, hostIP = adapterInfo
+        # Pos 1: Local IP
+        # Pos 2: Destination port
+        srcPort : int = 0
+        if len(adapterInfo) == 2:
+            localIp, dstPort = adapterInfo
+        elif len(adapterInfo) == 3:
+            localIp, dstPort, srcPort = adapterInfo
+        else:
+            raise NetworkErr("Invalid adapter info tuple; expected (local_bind_ip, port)")
+
+        # When callers pass a 3-tuple for inbound adapters but omit srcPort,
+        # bind to dstPort so host-pushed telemetry/stream packets can arrive.
+        if srcPort is None:
+            srcPort = dstPort
+        
         if dstPort is None:
             raise NetworkErr("Port number must be specified for UDP adapter opening")
 
@@ -490,24 +462,33 @@ class NetworkManager:
             adapter_kind = "auto"
 
         logging.info(
-            "Opening UDP adapter: kind=%s, port=%s, localIp=%s, hostIp=%s",
+            "Opening UDP adapter: kind=%s, port=%s, localIp=%s",
             adapter_kind,
             dstPort,
-            localIp,
-            hostIP,
+            localIp
         )
-        
+
         # Create the underlying UDP adapter
-        udp_adapter = UDP(dstPort, ipHost)
+        udp_adapter = UDP(dstPort)
 
         # If no remote IP was provided, this adapter is intended for receiving
         # so bind it to the local port so recvfrom() will receive packets.
         try:
-            udp_adapter.bindSocket(0, localIp)  # Use kernel assigned src port
-            logging.info("Bound UDP adapter (%s) to port %s for receiving", adapter_kind, dstPort)
-
+            bind_ok = udp_adapter.bindSocket(srcPort, localIp)
+            if not bind_ok:
+                raise NetworkErr(
+                    f"Failed to bind UDP adapter ({adapter_kind}) localIp={localIp} srcPort={srcPort} dstPort={dstPort}"
+                )
+            logging.info(
+                "Bound UDP adapter (%s) to local %s:%s (dest port %s)",
+                adapter_kind,
+                localIp,
+                srcPort,
+                dstPort,
+            )
         except Exception as e:
             logging.error("Failed to bind UDP adapter %s", e)
+            raise
 
         # Create a Socket wrapper that runs the receive thread
         socket_wrapper = Socket(udp_adapter, recvCallback, recvBuffSize)
@@ -521,67 +502,108 @@ class NetworkManager:
 
     @staticmethod
     def getUDPAdapter(
-        port : int,
+        dstPort : int = None,
+        srcPort : int = None,
         recvBuffSize : int = 4096,
-        OnRx : callable = None
+        OnRx : callable = None,
+        name : str = ""
     ) -> int :
         """
         Get the UDP adapter by name. Create if none available
 
         Args:
-            port (int) : Destination port
+            dstPort (int) : Destination port
+            srcPort (int) : Source port (optional, use 0 for kernel-assigned ephemeral port)
+            recvBuffSize (int) : Receive buffer size for the UDP socket
             OnRx (callable) : Reception callback
 
         Returns:
             int: Adapter descriptor if found, -1 otherwise
         """
-        if not isinstance(port, int):
+        if not isinstance(dstPort, int):
             raise NetworkErr(
-                "Unrecognized port type: %s (value=%r)" % (type(port).__name__, port)
+                "Unrecognized port type: %s (value=%r)" % (type(dstPort).__name__, dstPort)
             )
+            
+        if (dstPort is None) and (srcPort is None):
+            raise NetworkErr("At least one of dstPort or srcPort must be non-zero for UDP adapter creation")
+
         desc : int = -1
-        if port in _portToSocket:
-            entry = _portToSocket.get(port)
+        if dstPort in _dstPortToSocket:
+            entry = _dstPortToSocket.get(dstPort)
             if not isinstance(entry, (list, tuple)) or len(entry) < 1:
-                raise NetworkErr(f"Corrupted adapter mapping for port {port}: {entry!r}")
+                raise NetworkErr(f"Corrupted adapter mapping for port {dstPort}: {entry!r}")
 
             desc = entry[0]
             if not isinstance(desc, int) or desc < 0:
-                raise NetworkErr(f"Invalid adapter descriptor for port {port}: {desc!r}")
+                raise NetworkErr(f"Invalid adapter descriptor for port {dstPort}: {desc!r}")
 
             # Descriptor must always index into _socketList.
             if desc >= len(_socketList):
                 raise NetworkErr(
-                    f"Descriptor out of range for port {port}: desc={desc}, socket_count={len(_socketList)}"
+                    f"Descriptor out of range for port {dstPort}: desc={desc}, socket_count={len(_socketList)}"
                 )
 
             # Self-heal mapping payload if tuple/list payload is missing.
             if len(entry) == 1:
-                _portToSocket[port] = [desc, _socketList[desc]]
+                _dstPortToSocket[dstPort] = [desc, _socketList[desc]]
 
-            logging.info("Reusing existing UDP adapter descriptor %s for port %s", desc, port)
-        else:
+            logging.info("Reusing existing UDP adapter descriptor %s for port %s", desc, dstPort)
+        elif srcPort in _srcPortToSocket:
+            entry = _srcPortToSocket.get(srcPort)
+            if not isinstance(entry, (list, tuple)) or len(entry) < 1:
+                raise NetworkErr(f"Corrupted adapter mapping for source port {srcPort}: {entry!r}")
+
+            desc = entry[0]
+            if not isinstance(desc, int) or desc < 0:
+                raise NetworkErr(f"Invalid adapter descriptor for source port {srcPort}: {desc!r}")
+
+            # Descriptor must always index into _socketList.
+            if desc >= len(_socketList):
+                raise NetworkErr(
+                    f"Descriptor out of range for source port {srcPort}: desc={desc}, socket_count={len(_socketList)}"
+                )
+
+            # Self-heal mapping payload if tuple/list payload is missing.
+            if len(entry) == 1:
+                _srcPortToSocket[srcPort] = [desc, _socketList[desc]]
+
+            logging.info("Reusing existing UDP adapter descriptor %s for source port %s", desc, srcPort)
+        elif dstPort is not None or srcPort is not None:
             # Descriptor is the index into _socketList.
             desc = len(_socketList)
             req = SockReq(
                 callback=OnRx,
-                port=port,
+                dstPort=dstPort,
+                srcPort=srcPort,
                 bufferSize=recvBuffSize,
                 sockDesc=desc,
+                name=name
             )
-            # Request to wlan and eth
-            _wlanSockOpenReqQueue.put(req)
-            
+
             # Only submit to the wlan socket queue if the discovery queue is live
-            
             _ethSockOpenReqQueue.put(req)
             
-            _registeredSockMap[port] = desc
+            _registeredSockMap[dstPort] = desc
             # Mark as registered immediately so repeated calls can reuse the descriptor.
             pair = [None, None]
             _socketList.append(pair)
-            _portToSocket[port] = [desc, pair]
+            if dstPort is not None: _dstPortToSocket[dstPort] = [desc, pair]
+            if srcPort is not None: _srcPortToSocket[srcPort] = [desc, pair]
+
+            adapters = NetworkManager.determineNicIp()
+            wifi_info = adapters["wifi"]
+            _IfaceIps[IfaceId.WlanIface.value] = wifi_info[0] if wifi_info is not None else None
+
+            wlan = NetworkManager.openUDPAdapter(
+                (_IfaceIps[IfaceId.WlanIface.value], dstPort, srcPort), 
+                recvCallback=req.callback,
+                recvBuffSize=req.bufferSize,
+            )
             
+            iface_list = _socketList[req.sockDesc]
+            iface_list[IfaceId.WlanIface.value] = wlan            
+            logging.info("Registered new UDP adapter descriptor %s for port %s", desc, dstPort)
             
         return desc
             
