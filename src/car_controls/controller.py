@@ -181,14 +181,20 @@ class Controller(BaseClass):
         """
         Left joystick handler
         """
-        if abs(self.__last_joystick_x - x) > 2:
-            self.__last_joystick_x = x
+        # This runs inside pydualsense's read thread; an uncaught exception here
+        # kills the device and triggers a connect/disconnect loop. Guard it.
+        try:
+            if abs(self.__last_joystick_x - x) > 2:
+                self.__last_joystick_x = x
 
-        steer_cmd = MotorCommands()
-        steer_cmd.ModuleSteer(x)
+            steer_cmd = MotorCommands()
+            steer_cmd.ModuleSteer(x)
+            print(f"Steer command: {x}")
 
-        fwd_cmd = MotorCommands()
-        fwd_cmd.ModuleFwdDir(y)
+            fwd_cmd = MotorCommands()
+            fwd_cmd.ModuleFwdDir(y)
+        except Exception as exc:
+            logging.error("Failed to dispatch joystick command: %s", exc)
 
 
     def __r_joystick( self, x : int, y : int ) -> None:

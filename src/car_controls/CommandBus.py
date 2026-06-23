@@ -513,7 +513,7 @@ class UpdaterCommand(Command):
     
     def __init__(self, *args, socket=None, **kwargs):
         super().__init__(*args, socket=socket, **kwargs)
-        self.moduleId = ModuleIDs.MODULE_UPDATER.value
+        self.moduleId = ModuleIDs.UpdaterModule.value
         
     def ModuleInitUpdate(self, replyCallback: callable = None) -> None:
         pass
@@ -545,7 +545,7 @@ class MotorCommands(Command):
     
     def __init__(self, *args, socket=None, **kwargs):
         super().__init__(*args, socket=socket, **kwargs)
-        self.moduleId = ModuleIDs.MODULE_MOTOR_CONTROL.value
+        self.moduleId = ModuleIDs.MotorControllerModule.value
         
     def ModuleSteer(self, angle: float, replyCallback: callable = None) -> None:
         self.dispatchCommand(self.CmdSteer, value=angle, replyCallback=replyCallback)
@@ -559,7 +559,7 @@ class MotorCommands(Command):
     def getBytes(self) -> bytes:
         # Implement serialization logic specific to motor commands if needed
         return super().getBytes()  # Or provide custom serialization
-    
+
 class CamStreamSelectionModes(Enum):
     StreamCameraSource = 0
     StreamSimSource    = auto()

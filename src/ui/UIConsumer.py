@@ -392,7 +392,7 @@ class BackendIface(QThread):
             logging.error("Failed to parse calibration parameters payload: %s", exc)
             return
 
-        logging.info("Loaded streaming parameters: %s", params)
+        logging.info("Loaded streaming parameters")
         # Here you would typically emit a signal or store the params for UI consumption
         self.paramsLoaded.emit(params)
 
@@ -428,10 +428,13 @@ class BackendIface(QThread):
             videoNames = [name for name in videoList if name]
         else:
             videoNames = []
+        nameList  = ""
+        for name in videoNames:
+            nameList += name.split(".")[-1] + "\r\n"
         logging.info("Loaded stored video list: %s", videoNames)
         self.videoListLoaded.emit(loadedVideoName, videoNames)
-        
-        
+
+
     def __handleVideoSavedOnDeviceReply(self, reply : Reply):
         """
         Handles replies from the video saved on device command
@@ -448,8 +451,8 @@ class BackendIface(QThread):
         logging.info(f"Video successfully saved on device")
         self.videoStoredToDevice.emit()
         self.__loadStoredVideoList()
-        
-        
+
+
     @pyqtSlot(bool)
     def startVideoStream(self, enable: bool) -> None:
         """Start or stop video streaming to the car."""
