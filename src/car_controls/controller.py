@@ -26,7 +26,7 @@ class Controller(BaseClass):
         self.__last_joystick_y : int = 0
 
         self.__controllerConnected = False
-
+        self.__remoteConnected = False
         self.__event_loop_started = False
 
         # Shutdown event for graceful thread termination
@@ -46,6 +46,16 @@ class Controller(BaseClass):
 
         # Start the controller detection thread
         self.createThread("controller-discover", self.__controllerConnectionManager)
+        
+    
+    def setDeviceConnected(self, connected : bool) -> None:
+        """
+        Set the remote device connection status
+
+        Args:
+            connected (bool): True if the remote device is connected, False otherwise
+        """
+        self.__remoteConnected = connected
 
 
     def __controllerConnectionManager(self) -> None:
@@ -164,6 +174,8 @@ class Controller(BaseClass):
             state (bool): Button press state
         """
         # Placeholder: route button presses if needed
+        if not self.__remoteConnected:
+            return  # Ignore button presses if remote device is not connected
         _ = state
 
 
@@ -174,6 +186,8 @@ class Controller(BaseClass):
         Args:
             state (bool): Button press state
         """
+        if not self.__remoteConnected:
+            return  # Ignore button presses if remote device is not connected
         _ = state
 
 
@@ -183,25 +197,30 @@ class Controller(BaseClass):
         """
         # This runs inside pydualsense's read thread; an uncaught exception here
         # kills the device and triggers a connect/disconnect loop. Guard it.
+        if not self.__remoteConnected:
+            return  # Ignore joystick commands if remote device is not connected
         try:
-            if abs(self.__last_joystick_x - x) > 2:
+            if abs(self.__last_joystick_x - x) > 3:
                 self.__last_joystick_x = x
 
-            steer_cmd = MotorCommands()
-            steer_cmd.ModuleSteer(x)
-            print(f"Steer command: {x}")
+                steer_cmd = MotorCommands()
+                steer_cmd.ModuleSteer(x)
 
-            fwd_cmd = MotorCommands()
-            fwd_cmd.ModuleFwdDir(y)
+            if abs(self.__last_joystick_y - y) > 3:
+                self.__last_joystick_y = y
+                fwd_cmd = MotorCommands()
+                fwd_cmd.ModuleFwdDir(y)
         except Exception as exc:
             logging.error("Failed to dispatch joystick command: %s", exc)
 
 
     def __r_joystick( self, x : int, y : int ) -> None:
         """
-        Left joystick handler
+        Right joystick handler
         """
         # Extend to emit right-joystick commands if needed
+        if not self.__remoteConnected:
+            return  # Ignore joystick commands if remote device is not connected
         _ = (x, y)
 
 

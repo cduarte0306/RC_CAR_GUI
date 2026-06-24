@@ -211,7 +211,7 @@ class BackendIface(QThread):
         while self.__pingShutdownEvent.is_set() == False:
             time.sleep(1)
             self.__disconnectTimer += 1
-            if self.__disconnectTimer >= 5:  # 5 seconds timeout
+            if self.__disconnectTimer >= 2:  # 2 seconds timeout
                 logging.warning("No communication from device %s; assuming disconnected", self.__connected_ip)
                 self.__connected_ip = ""
                 self.__commandBus.flushReplyCache()
@@ -643,6 +643,7 @@ class BackendIface(QThread):
         self.__loadStoredVideoList()
         self.__loadParams()
         self.startVideoStream(True)
+        self.__controller.setDeviceConnected(True)
         pass
 
     def connectToDevice(self, ip: str) -> None:
