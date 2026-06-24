@@ -32,6 +32,12 @@ Renderer3D::~Renderer3D() {
     enableVisualizerWindow(false);
 }
 
+void Renderer3D::setCloudDimensions(int width, int height) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    cloudWidth_  = width;
+    cloudHeight_ = height;
+}
+
 void Renderer3D::setClearColor(float r, float g, float b, float a) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     clearColor_[0] = r;
@@ -245,11 +251,11 @@ void Renderer3D::updatePointCloud_(const std::vector<PointXYZ>& points, const st
     const int W = cloudWidth_;
     const int H = cloudHeight_;
 
-    // Clamp ROI rect (defensive)
-    const int u0 = std::max(0, std::min(roiU0_, W));
-    const int u1 = std::max(0, std::min(roiU1_, W));
-    const int v0 = std::max(0, std::min(roiV0_, H));
-    const int v1 = std::max(0, std::min(roiV1_, H));
+    // Compute pixel ROI from fractional bounds
+    const int u0 = std::max(0, std::min(static_cast<int>(roiU0Frac_ * W), W));
+    const int u1 = std::max(0, std::min(static_cast<int>(roiU1Frac_ * W), W));
+    const int v0 = std::max(0, std::min(static_cast<int>(roiV0Frac_ * H), H));
+    const int v1 = std::max(0, std::min(static_cast<int>(roiV1Frac_ * H), H));
 
     for (size_t i = 0; i < safePoints.size(); i++) {
         const PointXYZ& p = safePoints[i];

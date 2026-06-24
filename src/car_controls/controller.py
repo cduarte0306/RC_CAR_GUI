@@ -9,7 +9,7 @@ import types
 
 from utils.utilities import Signal
 from .BaseClass import BaseClass
-from .CommandBus import CommandBus, Command, commands
+from .CommandBus import CommandBus, MotorCommands
 
 
 class Controller(BaseClass):
@@ -17,7 +17,7 @@ class Controller(BaseClass):
     controllerBatteryLevel = Signal(int)  # Emitted when battery level changes
     controllerDisconnected = Signal()  # Emitted when controller is disconnected
     
-    def __init__( self, CommandBus: CommandBus ) -> None:
+    def __init__( self ) -> None:
         super().__init__()  # Initialize parent class
 
         self.__ds = self.__create_dualsense()
@@ -26,7 +26,7 @@ class Controller(BaseClass):
         self.__last_joystick_y : int = 0
 
         self.__controllerConnected = False
-
+        self.__remoteConnected = False
         self.__event_loop_started = False
 
         # Shutdown event for graceful thread termination
@@ -34,7 +34,7 @@ class Controller(BaseClass):
         self.__shutdownEvent.clear()
 
         # Command dispatch
-        self.__bus = CommandBus
+        self.__bus = CommandBus.getInstance()
 
         # Signals
         self.controllerFound = Signal()  # Emitted when a controller is found
@@ -46,6 +46,16 @@ class Controller(BaseClass):
 
         # Start the controller detection thread
         self.createThread("controller-discover", self.__controllerConnectionManager)
+        
+    
+    def setDeviceConnected(self, connected : bool) -> None:
+        """
+        Set the remote device connection status
+
+        Args:
+            connected (bool): True if the remote device is connected, False otherwise
+        """
+        self.__remoteConnected = connected
 
 
     def __controllerConnectionManager(self) -> None:
@@ -164,6 +174,8 @@ class Controller(BaseClass):
             state (bool): Button press state
         """
         # Placeholder: route button presses if needed
+        if not self.__remoteConnected:
+            return  # Ignore button presses if remote device is not connected
         _ = state
 
 
@@ -174,6 +186,8 @@ class Controller(BaseClass):
         Args:
             state (bool): Button press state
         """
+        if not self.__remoteConnected:
+            return  # Ignore button presses if remote device is not connected
         _ = state
 
 
@@ -181,18 +195,32 @@ class Controller(BaseClass):
         """
         Left joystick handler
         """
-        if abs(self.__last_joystick_x - x) > 2:
-            self.__last_joystick_x = x
+        # This runs inside pydualsense's read thread; an uncaught exception here
+        # kills the device and triggers a connect/disconnect loop. Guard it.
+        if not self.__remoteConnected:
+            return  # Ignore joystick commands if remote device is not connected
+        try:
+            if abs(self.__last_joystick_x - x) > 3:
+                self.__last_joystick_x = x
 
-        self.__bus.submit(Command(commands.CMD_STEER.value, x))
-        self.__bus.submit(Command(commands.CMD_FWD_DIR.value, y))
+                steer_cmd = MotorCommands()
+                steer_cmd.ModuleSteer(x)
+
+            if abs(self.__last_joystick_y - y) > 3:
+                self.__last_joystick_y = y
+                fwd_cmd = MotorCommands()
+                fwd_cmd.ModuleFwdDir(y)
+        except Exception as exc:
+            logging.error("Failed to dispatch joystick command: %s", exc)
 
 
     def __r_joystick( self, x : int, y : int ) -> None:
         """
-        Left joystick handler
+        Right joystick handler
         """
         # Extend to emit right-joystick commands if needed
+        if not self.__remoteConnected:
+            return  # Ignore joystick commands if remote device is not connected
         _ = (x, y)
 
 

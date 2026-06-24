@@ -37,6 +37,7 @@ public:
     void setPointCloudData(char* pcData, size_t numPoints);
     void setPointCloudColorData(char* pcData, char* rgbData, size_t numPoints);
     void setClearColor(float r, float g, float b, float a = 1.0f);
+    void setCloudDimensions(int width, int height);
     void enableVisualizerWindow(bool enable = true);
     std::uintptr_t GetWindowId() const;
 
@@ -60,17 +61,17 @@ private:
     };
 
     // In Renderer3D class (public or private with setters)
-    int cloudWidth_  = 480;   // disparity width
-    int cloudHeight_ = 270;   // disparity height
+    int cloudWidth_  = 0;
+    int cloudHeight_ = 0;
 
     // ROI controls
     bool roiEnable_ = true;
 
-    // Image ROI (pixel-space)
-    int roiU0_ = 120;   // left
-    int roiU1_ = 360;   // right (exclusive)
-    int roiV0_ =  70;   // top
-    int roiV1_ = 200;   // bottom (exclusive)
+    // Image ROI (fractional, 0.0–1.0, mapped to cloudWidth_/cloudHeight_)
+    float roiU0Frac_ = 0.25f;  // left
+    float roiU1Frac_ = 0.75f;  // right
+    float roiV0Frac_ = 0.19f;  // top
+    float roiV1Frac_ = 0.81f;  // bottom
 
     // Angle ROI (radians)
     float roiMaxYawRad_   = 20.0f * 3.14159265f / 180.0f;

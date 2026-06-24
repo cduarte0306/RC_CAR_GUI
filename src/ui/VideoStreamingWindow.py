@@ -3011,8 +3011,6 @@ class VideoStreamingWindow(QWidget):
                 if not self.__calibModeBtn.isChecked():
                     self.__calibModeBtn.setChecked(True)
                     self.__toggleCalibrationMode(emit_signal=emit_signal)
-            if emit_signal:
-                self.__applyCalibrationToCamera()
         else:
             if hasattr(self, "_VideoStreamingWindow__calibModeBtn"):
                 if self.__calibModeBtn.isChecked():

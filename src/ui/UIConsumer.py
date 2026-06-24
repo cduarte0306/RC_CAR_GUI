@@ -4,8 +4,10 @@ from utils.utilities import CircularBuffer
 
 from car_controls.VideoStreaming import VideoStreamer, FrameHeader
 from car_controls.controller import Controller
-from car_controls.CommandBus import (CamCommands, CamStreamSelectionModes,
-                                     CommandBus, Command, commands, CameraCommand, ReplyPayload, Reply)
+from car_controls.CommandBus import (CamStreamSelectionModes,
+                                     CommandBus, Command, CameraCommand, RcCommands,
+                                     Reply,
+                                     MotorCommands, UpdaterCommand, val_type_t)
 from network.NetworkManager import NetworkManager
 from network.udp_client import UDP
 
@@ -16,13 +18,16 @@ import re
 import ctypes
 import socket
 
-from threading import Thread, Event
+from threading import Event
+from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 import logging
 
 from utils.utilities import Signal
 import configparser
+
+import Defines
 
 
 class BackendIface(QThread):
@@ -45,6 +50,9 @@ class BackendIface(QThread):
     controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
     paramsLoaded                = pyqtSignal(dict)           # Emitted when calibration parameters are loaded
     
+    # Firmware update signals
+    firmwareUpdateState         = pyqtSignal(bool)           # To be called by the backend to notify the UI of the return state of the latest firmware update command (success/failure)
+
     # Status signals
     videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
     videoStoredToDevice         = pyqtSignal()               # Emitted when video is successfully stored on device
@@ -52,10 +60,6 @@ class BackendIface(QThread):
     # Error signals
     failedToStoreVideoOnDevice  = pyqtSignal(str)  # Emitted when saving video on device fails
 
-    CONTROLLER_PORT = 65000
-    STREAM_PORT     = 5005
-    STREAM_OUT_PORT = 5006
-    TELEMETRY_PORT  = 6000
 
     def __init__(self):
         super().__init__()
@@ -67,53 +71,26 @@ class BackendIface(QThread):
         parser.read(self.__config_path)
         # Video stream-out local adapter (Ethernet) selection.
         # Backwards-compatible fallback to the old `adapter_ip` key.
-        self.__video_out_adapter_ip: str = (
-            parser.get("settings", "video_out_adapter_ip", fallback="") or ""
-        ).strip() or (parser.get("settings", "adapter_ip", fallback="0.0.0.0") or "0.0.0.0").strip()
-        if self.__video_out_adapter_ip and self.__video_out_adapter_ip != "0.0.0.0":
-            try:
-                socket.inet_aton(self.__video_out_adapter_ip)
-            except OSError:
-                logging.warning(
-                    "Invalid video_out_adapter_ip in config (%s); falling back to Auto",
-                    self.__video_out_adapter_ip,
-                )
-                self.__video_out_adapter_ip = "0.0.0.0"
-        
-        # Create the network manager
-        self.__networkManager : NetworkManager = NetworkManager()
-
-        # Create the adapters
-        # Controller adapter now listens for replies via callback
-        self.__controllerAdapterEth       : UDP = self.__networkManager.openAdapter(
-            "controllerEth", (BackendIface.CONTROLLER_PORT, "192.168.1.10", "192.168.1.1"), self.__controllerReplyCallbackEth
-        )
-        
-        self.__controllerAdapter       : UDP = self.__networkManager.openAdapter(
-            "controller", (BackendIface.CONTROLLER_PORT, ""), self.__controllerReplyCallback
-        )
-        # Create outbound adapter first (no receive callback)
-        # self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter("streamOut" , (BackendIface.STREAM_PORT, "192.168.1.10"), self.__videoReceivedEthCallback, recvBuffSize=65507)    
-        self.__videoStreameEthAdapter : UDP = self.__networkManager.openAdapter(
-            "streamOut", (BackendIface.STREAM_OUT_PORT, "192.168.1.10", "192.168.1.1"), recvBuffSize=65507 ,recvCallback=self.__videoReceivedEthCallback
-        )
 
         # Create buffers and streamer before wiring the inbound adapter callback
-        self.__videoBuffer    : CircularBuffer = CircularBuffer(100)
         self.__tlmBuffer      : CircularBuffer = CircularBuffer(100)
-        
+
         # Create VideoStreamer without inbound adapter; inbound frames will be fed via callback
-        self.__videoStreamer  : VideoStreamer  = VideoStreamer(None, self.__videoStreameEthAdapter)
+        self.__videoStreamer  : VideoStreamer  = VideoStreamer()
 
         # Now open the inbound adapter and pass our callback (starts receive thread)
-        self.__videoStreamerInAdapter  : UDP = self.__networkManager.openAdapter("streamerIn", (BackendIface.STREAM_PORT, ""), self.__videoReceivedCallback, recvBuffSize=65507)
-        self.__commandBus     : CommandBus     = CommandBus(self.__controllerAdapter)
-        self.__commandBusEth  : CommandBus     = CommandBus(self.__controllerAdapterEth)
-        self.__controller     : Controller     = Controller(self.__commandBus)
+        self.__commandBus     : CommandBus = CommandBus.getInstance()
+        self.__controller     : Controller = Controller()
+        
+        self.__networkMgr = NetworkManager()
 
-        # Open adapter for motor telemetry at port 6000
-        self.__telemetryAdapter : UDP = self.__networkManager.openAdapter(
-            "telemetry", (BackendIface.TELEMETRY_PORT, ""), self.__telemetryReceivedCallback
+        # Telemetry is inbound-only, so listen on all local interfaces rather
+        # than tying reception to whichever NIC discovery selected.
+        self._tlmSockFd = NetworkManager.getUDPAdapter(
+            Defines.TELEMETRY_PORT,
+            OnRx=self.__telemetryReceivedCallback,
+            recvBuffSize=1024,
+            name="Telemetry"
         )
 
         # controllerAdapter.deviceFound.connect(self.__deviceFound)
@@ -126,37 +103,34 @@ class BackendIface(QThread):
 
         # Connect signals
         # Forward discovered host IPs to the UI with the IP string
-        self.__networkManager.hostDiscovered.connect(lambda ip: self.__on_host_discovered(ip))
+        # self.__networkMgr.hostDiscovered.connect(lambda ip: self.deviceConnected.emit(ip))
+        self.__networkMgr.dataReceived.connect(lambda: self.__clearTimers)
+        self.__networkMgr.hostDiscovered.connect(lambda ip: self.deviceDiscovered.emit(ip))
         self.__videoStreamer.sendFrameSignal.connect(lambda pkt: self.__videoStreamOutThread(pkt))
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
-        self.__commandBus.replyReceived.connect(lambda reply: self.commandReplyReceived.emit(ctypes.string_at(ctypes.addressof(reply), ctypes.sizeof(reply))))
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
     
         # Default to disparity (normal) stereo streaming mode
-        self.setCameraSource(False)
-        self.setStereoMonoMode("disparity")
+        # self.setCameraSource(False)
+        # self.setStereoMonoMode("disparity")
         self.__disconnectTimer : int = 0  # Disconnect timer counter
         
-        # Ping thread
-        self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
-        self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
+        # Background workers for ping and disconnect watchdog
+        self.__threadPool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="backend-iface")
+        self.__pingFuture = None
+        self.__disconnectFuture = None
         
         self.__pingShutdownEvent = Event()
-        
-        # Callback signals
-        self.__videoSavedOnDeviceSignal = Signal(Reply)
-        self.__loadVideoNamesSignal     = Signal(Reply)
-        self.__loadParamsSignal         = Signal(Reply)
 
         # Connect to reply callbacks
-        self.__videoSavedOnDeviceSignal.connect(self.__handleVideoSavedOnDeviceReply)
-        self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
-        self.__loadParamsSignal.connect(self.__handleParamsReply)
+        # self.__videoSavedOnDeviceSignal.connect(self.__handleVideoSavedOnDeviceReply)
+        # self.__loadVideoNamesSignal.connect(self.__handleStoredVideoListReply)
+        # self.__loadParamsSignal.connect(self.__handleParamsReply)
         
         self.setDisparityRenderMode("depth")
         
@@ -168,8 +142,8 @@ class BackendIface(QThread):
         # This will be called when the object is garbage collected
         self.__threadCanRun = False
         self.__pingShutdownEvent.set()
-        self.__ping_thread.join()
-        self.__disconnectTimerObj.join()
+        if self.__threadPool is not None:
+            self.__threadPool.shutdown(wait=False, cancel_futures=True)
 
 
     def getVideoOutAdapterIp(self) -> str:
@@ -237,7 +211,7 @@ class BackendIface(QThread):
         while self.__pingShutdownEvent.is_set() == False:
             time.sleep(1)
             self.__disconnectTimer += 1
-            if self.__disconnectTimer >= 5:  # 5 seconds timeout
+            if self.__disconnectTimer >= 2:  # 2 seconds timeout
                 logging.warning("No communication from device %s; assuming disconnected", self.__connected_ip)
                 self.__connected_ip = ""
                 self.__commandBus.flushReplyCache()
@@ -258,16 +232,9 @@ class BackendIface(QThread):
     def __controllerReplyCallbackEth(self, data: bytes) -> None:
         """Handle async replies arriving on the Ethernet controller socket."""
         try:
-            self.__commandBusEth.processReply(data)
+            self.__commandBus.processReply(data)
         except Exception as exc:
             logging.error("Failed to emit ethernet controller reply: %s", exc)
-
-
-    def __on_host_discovered(self, ip: str) -> None:
-        # remember device and notify UI
-        if ip not in self.__devicesPool:
-            self.__devicesPool.append(ip)
-        self.deviceDiscovered.emit(ip)
 
 
     def __telemetryReceivedCallback(self, data : bytes) -> None:
@@ -277,10 +244,8 @@ class BackendIface(QThread):
         Args:
             data (bytes): Telemetry data
         """
-        if self.__looks_like_video_packet(data):
-            self.__videoReceivedCallback(data)
-            return
-        # For now, just log telemetry size
+        # Port 6000 is reserved for telemetry; do not attempt to reinterpret
+        # these datagrams as video fragments.
         logging.debug("Received telemetry data (%d bytes)", len(data))
         self.__tlmBuffer.push(data)
         
@@ -377,8 +342,8 @@ class BackendIface(QThread):
         """
         Start the device discovery service
         """
-        self.__networkManager.startDiscovery()
-        
+        self.__networkMgr.startDiscovery()
+
 
     def __startingVideoTransmission(self) -> None:
         """
@@ -388,12 +353,10 @@ class BackendIface(QThread):
         
         # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdClrVideoRec.value  # CmdSelCameraStream on host
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleClearVideoRecordings()
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
             
@@ -429,11 +392,11 @@ class BackendIface(QThread):
             logging.error("Failed to parse calibration parameters payload: %s", exc)
             return
 
-        logging.info("Loaded streaming parameters: %s", params)
+        logging.info("Loaded streaming parameters")
         # Here you would typically emit a signal or store the params for UI consumption
         self.paramsLoaded.emit(params)
-        
-        
+
+
     def __handleStoredVideoListReply(self, reply : Reply):
         """
         Handles replies from the load stored video names command
@@ -465,10 +428,13 @@ class BackendIface(QThread):
             videoNames = [name for name in videoList if name]
         else:
             videoNames = []
+        nameList  = ""
+        for name in videoNames:
+            nameList += name.split(".")[-1] + "\r\n"
         logging.info("Loaded stored video list: %s", videoNames)
         self.videoListLoaded.emit(loadedVideoName, videoNames)
-        
-        
+
+
     def __handleVideoSavedOnDeviceReply(self, reply : Reply):
         """
         Handles replies from the video saved on device command
@@ -481,12 +447,12 @@ class BackendIface(QThread):
             logging.error("Failed to save video on device; status=%d", status)
             self.failedToStoreVideoOnDevice.emit(f"Failed to save video on device; status={status}")
             return
-        
+
         logging.info(f"Video successfully saved on device")
         self.videoStoredToDevice.emit()
         self.__loadStoredVideoList()
-        
-        
+
+
     @pyqtSlot(bool)
     def startVideoStream(self, enable: bool) -> None:
         """Start or stop video streaming to the car."""
@@ -494,12 +460,13 @@ class BackendIface(QThread):
         
         # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdStartStream.value if enable else CamCommands.CmdStopStream.value  # CmdSelCameraStream on host
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            if enable:
+                cam_cmd.ModuleStartStream()
+            else:
+                cam_cmd.ModuleStopStream()
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
 
@@ -528,15 +495,9 @@ class BackendIface(QThread):
         
         extraCommandPayload = json.dumps(extraCommand).encode("utf-8")
         
-        # Build nested CameraCommand payload
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
-        cam_cmd.data.u8 = CamStreamSelectionModes.StreamCameraSource.value
-        cam_cmd.payloadLen = len(extraCommandPayload)
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + extraCommandPayload
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource, payload=extraCommandPayload)
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
 
@@ -546,14 +507,9 @@ class BackendIface(QThread):
         """Set the camera source to either simulation or physical camera."""
         logging.info("Requested simulation source mode")
         
-        # Build nested CameraCommand payload
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelCameraStream.value  # CmdSelCameraStream on host
-        cam_cmd.data.u8 = CamStreamSelectionModes.StreamSimSource.value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
         except Exception as exc:
             logging.error("Failed to enqueue camera mode command: %s", exc)
 
@@ -564,14 +520,10 @@ class BackendIface(QThread):
         if not params:
             return
         logging.info("Stereo calibration params requested: %s", params)
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdCalibrationWrtParams.value
-        cam_cmd.payloadLen = len(json.dumps(params).encode("utf-8"))
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        cam_payload = cam_payload + json.dumps(params).encode("utf-8")
+        params_payload = json.dumps(params).encode("utf-8")
         # Emit camera save video command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            CameraCommand().ModuleCalibrationWriteParams(params_payload)
         except Exception as exc:
             logging.error("Failed to enqueue save video command: %s", exc)
 
@@ -588,13 +540,12 @@ class BackendIface(QThread):
 
         mode = "calibration"
         logging.info("Setting camera mode to: %s", mode)
-        cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelCameraStream.value
-        cam_cmd.data.u8 = mode_map[mode]
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         # Emit camera save video command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            if mode == "normal":
+                CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource)
+            else:
+                CameraCommand().ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
         except Exception as exc:
             logging.error("Failed to enqueue save video command: %s", exc)
 
@@ -626,11 +577,8 @@ class BackendIface(QThread):
         logging.info("Calibration result store requested")
         payload = json.dumps({"action": "store"}).encode("utf-8")
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdCalibrationSave.value
-        cam_cmd.payloadLen = len(payload)
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd)) + payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleCalibrationSave(payload)
         except Exception as exc:
             logging.error("Failed to enqueue calibration store command: %s", exc)
 
@@ -639,13 +587,9 @@ class BackendIface(QThread):
         """Send command to save video on the device with the given name."""        
         logging.info(f"Commanding video save")
         
-        # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSaveVideo.value  # hypothetical command
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        # Emit camera save video command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__videoSavedOnDeviceSignal))
+            cam_cmd.ModuleSaveVideo(videoName.encode("utf-8"), self.__handleVideoSavedOnDeviceReply)
         except Exception as exc:
             logging.error("Failed to enqueue save video command: %s", exc)
 
@@ -675,15 +619,32 @@ class BackendIface(QThread):
             return
 
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSelCameraStream.value
-        cam_cmd.data.u8 = mode_map[mode]
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
 
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            if mode == "normal":
+                cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamCameraSource)
+            else:
+                cam_cmd.ModuleSelectCameraStream(CamStreamSelectionModes.StreamSimSource)
         except Exception as exc:
             logging.error("Failed to enqueue stereo-mono mode command: %s", exc)
 
+    def __OnDeviceConnected(self, ip: str) -> None:
+        """Handle device connection event.
+
+        Args:
+            ip (str): The IP address of the connected device.
+        """
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        logging.info(f"Detected device connection with IP {ip} at {time_str}")
+
+        # Trigger on device connection signal
+        self.deviceConnected.emit(ip)
+        
+        self.__loadStoredVideoList()
+        self.__loadParams()
+        self.startVideoStream(True)
+        self.__controller.setDeviceConnected(True)
+        pass
 
     def connectToDevice(self, ip: str) -> None:
         """Attempt to connect to the RC car at the given IP. This sets the
@@ -692,11 +653,18 @@ class BackendIface(QThread):
         Note: actual transport-level controller binding may be performed elsewhere;
         here we record the selection and notify listeners."""
         self.__connected_ip = ip
+        logging.info(f"Connecting to device at {ip}")
+        self.__networkMgr.StartConnection(ip, self.__OnDeviceConnected)
+        
+        # Start disconnect timer
+        if self.__disconnectFuture is None or self.__disconnectFuture.done():
+            self.__disconnectFuture = self.__threadPool.submit(self.__check_disconnect)
+            
+        if self.__pingFuture is None or self.__pingFuture.done():
+            self.__pingFuture = self.__threadPool.submit(self.__ping_loop)
+        return
         # Potential place to reconfigure adapters or start sessions
-        self.__controllerAdapter.setServerIP(ip)
-
-        # Kick off host unicast video by sending a NOOP command
-        self.__commandBus.submit(Command(commands.CMD_NOOP.value, 0))
+        self.__videoStreameEthAdapter.setServerIP(ip)
 
         self.__controller.StartComms()
         self.deviceConnected.emit(ip)
@@ -708,14 +676,12 @@ class BackendIface(QThread):
         self.deviceMacResolved.emit(ip, mac if mac else "")
         
         # Start the constant ping thread to keep connection alive
-        if not self.__ping_thread.is_alive():
-            self.__ping_thread = Thread(target=self.__ping_loop, daemon=True)
-            self.__ping_thread.start()
+        if self.__pingFuture is None or self.__pingFuture.done():
+            self.__pingFuture = self.__threadPool.submit(self.__ping_loop)
         
         # Start disconnect timer
-        if not self.__disconnectTimerObj.is_alive():
-            self.__disconnectTimerObj = Thread(target=self.__check_disconnect, daemon=True)
-            self.__disconnectTimerObj.start()
+        if self.__disconnectFuture is None or self.__disconnectFuture.done():
+            self.__disconnectFuture = self.__threadPool.submit(self.__check_disconnect)
         
         # Load the list of stored videos from the device
         self.__loadStoredVideoList()
@@ -732,15 +698,10 @@ class BackendIface(QThread):
         """
         logging.info("Setting frame rate to %d fps", fps)
 
-        # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetFps.value  # CmdSelCameraStream on host
-        cam_cmd.data.u8 = fps
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
-        # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetFps(fps)
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
             
@@ -754,15 +715,10 @@ class BackendIface(QThread):
         """
         logging.info("Setting video quality to %d", quality)
     
-        # Command the camera to clear the buffer before starting
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetQuality.value  # CmdSelCameraStream on host
-        cam_cmd.data.u8 = quality
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         
-        # Emit camera mode command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetQuality(quality)
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
 
@@ -780,11 +736,8 @@ class BackendIface(QThread):
         self.__maxDisparityCurrent = value
         logging.info("Setting max disparity to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetMaxDisparities.value
-        cam_cmd.data.u16 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetMaxDisparities(value)
         except Exception as exc:
             logging.error("Failed to enqueue max disparity command: %s", exc)
 
@@ -795,11 +748,8 @@ class BackendIface(QThread):
         value = max(0, min(65535, value))
         logging.info("Setting confidence threshold to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetConfidenceThreshold.value
-        cam_cmd.data.u16 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetConfidenceThreshold(value)
         except Exception as exc:
             logging.error("Failed to enqueue confidence threshold command: %s", exc)
 
@@ -811,11 +761,8 @@ class BackendIface(QThread):
         fval = value / 100.0
         logging.info("Setting uniqueness ratio to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetUniquenessRatio.value
-        cam_cmd.data.f32 = fval
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetUniquenessRatio(fval)
         except Exception as exc:
             logging.error("Failed to enqueue uniqueness ratio command: %s", exc)
 
@@ -827,11 +774,8 @@ class BackendIface(QThread):
         value = max(0, min(max_disp, value))
         logging.info("Setting min disparity to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetMinDisparities.value
-        cam_cmd.data.i = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetMinDisparities(value)
         except Exception as exc:
             logging.error("Failed to enqueue min disparity command: %s", exc)
 
@@ -843,11 +787,8 @@ class BackendIface(QThread):
         value = max(1, min(255, value))
         logging.info("Setting P1 to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetP1.value
-        cam_cmd.data.u16 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetP1(value)
         except Exception as exc:
             logging.error("Failed to enqueue P1 command: %s", exc)
 
@@ -859,11 +800,8 @@ class BackendIface(QThread):
         value = max(1, min(255, value))
         logging.info("Setting P2 to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetP2.value
-        cam_cmd.data.u16 = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetP2(value)
         except Exception as exc:
             logging.error("Failed to enqueue P2 command: %s", exc)
 
@@ -875,11 +813,8 @@ class BackendIface(QThread):
         fval = max(0.0, min(50.0, fval))
         logging.info("Setting Z Max to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetZMax.value
-        cam_cmd.data.f32 = fval
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetZMax(fval)
         except Exception as exc:
             logging.error("Failed to enqueue Z Max command: %s", exc)
 
@@ -891,11 +826,8 @@ class BackendIface(QThread):
         fval = max(0.0, min(50.0, fval))
         logging.info("Setting Z Min to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetZMin.value
-        cam_cmd.data.f32 = fval
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetZMin(fval)
         except Exception as exc:
             logging.error("Failed to enqueue Z Min command: %s", exc)
 
@@ -907,11 +839,8 @@ class BackendIface(QThread):
         fval = max(0.0, min(10.0, fval))
         logging.info("Setting depth threshold to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetDepthThreshold.value
-        cam_cmd.data.f32 = fval
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetDepthThreshold(fval)
         except Exception as exc:
             logging.error("Failed to enqueue depth threshold command: %s", exc)
 
@@ -922,11 +851,8 @@ class BackendIface(QThread):
         value = max(0, min(50, int(value)))
         logging.info("Setting min agreeing pixels to %d", value)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetMinAgreeingPixels.value
-        cam_cmd.data.i = value
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetMinAgreeingPixels(value)
         except Exception as exc:
             logging.error("Failed to enqueue min agreeing pixels command: %s", exc)
 
@@ -938,37 +864,26 @@ class BackendIface(QThread):
         fval = max(0.0, min(10.0, fval))
         logging.info("Setting color threshold to %.2f", fval)
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdSetColorThreshold.value
-        cam_cmd.data.f32 = fval
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleSetColorThreshold(fval)
         except Exception as exc:
             logging.error("Failed to enqueue color threshold command: %s", exc)
-
-
+            
+            
     def __loadStoredVideoList(self) -> None:
         """Load the list of stored videos from the device."""
-        # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdLoadStoredVideos.value  # hypothetical command
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        # Emit camera load stored videos command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
+            cam_cmd.ModuleLoadStoredVideos(self.__handleStoredVideoListReply)
         except Exception as exc:
             logging.error("Failed to enqueue load stored videos command: %s", exc)
             
             
     def __loadParams(self) -> None:
         """Load calibration parameters from the device."""
-        # Build nested CameraCommand payload
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdRdParams.value  # hypothetical command
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        # Emit camera load stored videos command to the controller bus, with appended payload
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadParamsSignal))
+            cam_cmd.ModuleReadParams(self.__handleParamsReply)
         except Exception as exc:
             logging.error("Failed to enqueue load calibration parameters command: %s", exc)
 
@@ -981,12 +896,8 @@ class BackendIface(QThread):
             return
 
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdLoadSelectedVideo.value
-        cam_cmd.payloadLen = len(videoName)
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        cam_payload = cam_payload + videoName.encode("utf-8")
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload))
+            cam_cmd.ModuleLoadSelectedVideo(videoName)
         except Exception as exc:
             logging.error("Failed to enqueue load selected video command: %s", exc)
             
@@ -999,12 +910,8 @@ class BackendIface(QThread):
             return
 
         cam_cmd = CameraCommand()
-        cam_cmd.command = CamCommands.CmdDeleteVideo.value
-        cam_cmd.payloadLen = len(videoName)
-        cam_payload = ctypes.string_at(ctypes.addressof(cam_cmd), ctypes.sizeof(cam_cmd))
-        cam_payload = cam_payload + videoName.encode("utf-8")
         try:
-            self.__commandBus.submit(Command(commands.CMD_CAMERA_MODULE.value, 0, payload=cam_payload, signalCallback=self.__loadVideoNamesSignal))
+            cam_cmd.ModuleDeleteVideo(videoName)
             self.__loadStoredVideoList()
         except Exception as exc:
             logging.error("Failed to enqueue delete video command: %s", exc)
@@ -1018,15 +925,15 @@ class BackendIface(QThread):
             list: List of devices
         """
         return self.__devicesPool
-    
-    
+
+
     def __ping_loop(self):
         while not self.__pingShutdownEvent.is_set():
             if self.__connected_ip:
                 try:
                     # Ping over both command buses
-                    self.__commandBus.submit(Command(commands.CMD_NOOP.value, 0))
-                    self.__commandBusEth.submit(Command(commands.CMD_NOOP.value, 0))
+                    rcCommands = RcCommands()
+                    rcCommands.ping()
                 except Exception as exc:
                     logging.error("Failed to enqueue ping command: %s", exc)
             time.sleep(2)

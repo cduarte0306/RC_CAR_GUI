@@ -32,6 +32,9 @@ PYBIND11_MODULE(rc_car_cpp, m) {
         },
             py::arg("coordinates"), py::arg("rgb"), py::arg("numPoints"),
             "Render a RGB point cloud from numpy array or bytes")
+        .def("set_cloud_dimensions", &rc_car::Renderer3D::setCloudDimensions,
+            py::arg("width"), py::arg("height"),
+            "Set the expected point cloud grid dimensions (width x height)")
         .def("set_clear_color", &rc_car::Renderer3D::setClearColor,
             py::arg("r"), py::arg("g"), py::arg("b"), py::arg("a") = 1.0f,
             "Set the background clear color (RGBA)")

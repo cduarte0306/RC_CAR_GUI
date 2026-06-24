@@ -1,5 +1,5 @@
 ﻿import cv2
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import logging
 
 from network.udp_client import UDP
@@ -10,10 +10,14 @@ import time
 import os
 import ctypes
 import json
+import Defines
 from utils import utilities
 
 from utils.utilities import Signal
 from enum import Enum, auto
+
+from network.NetworkManager import NetworkManager
+
 
 import sys
 # Add paths for rc_car_cpp module and its Open3D dependencies
@@ -33,7 +37,11 @@ if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
     if os.path.isdir(cuda_bin):
         os.add_dll_directory(cuda_bin)
 
-import rc_car_cpp  # C++ bindings module
+try:
+    import rc_car_cpp  # C++ bindings module
+except ImportError as e:
+    logging.warning(f"Failed to import rc_car_cpp module: {e}")
+    rc_car_cpp = None  # Allow the rest of the code to run without 3D visualization
 
 
 MAX_UDP_PACKET_SIZE = 65507
@@ -157,7 +165,7 @@ class VideoStreamer:
         RecordPointCloud = auto()
 
 
-    def __init__(self, streamInAdapter: UDP = None, streamOutAdapter: UDP = None, path: str = ""):
+    def __init__(self, path: str = ""):
         self.__cap = None
 
         self.running = True
@@ -202,12 +210,16 @@ class VideoStreamer:
         self.__recordFourcc = cv2.VideoWriter_fourcc(*"mp4v")
         # Signals
         self.sendFrameSignal = Signal()  # Emitted when a frame is ready to be sent out
-
-        # Open receive socket (will do hostname lookup)
-        self.__streamSocket: UDP = streamInAdapter
+        self._newFrameEvent = Event()  # Internal event to signal new frame arrival
+        
+        # Open reception ports
+        self._strmInSockFd = NetworkManager.getUDPAdapter(
+            Defines.STREAM_PORT,
+            recvBuffSize=65507,
+            OnRx=self.setFrame   # Set frame 
+        )
 
         # Outbound socket (direct IP - no hostname lookup needed)
-        self.__streamOutSocket = streamOutAdapter
         self.__srcFile: str = path
 
         self.__fpsDelta: float
@@ -219,16 +231,17 @@ class VideoStreamer:
         # 3D point cloud visualizer (Open3D). The C++ side owns a dedicated render thread so
         # VideoStreamer can safely push point data from its worker thread.
         self.__renderer = None
-        self.__3dTimeoutThread = None
+        self.__3dTimeoutThread = None  # Create on demand
         self.__rendererOpened = False
         self.__timeoutCounter : int = 0
-        try:
-            self.__renderer = rc_car_cpp.Renderer3D()
-            # Match the PyQt dark theme (#0b111c)
-            self.__renderer.set_clear_color(0.043, 0.067, 0.110, 1.0)
-        except Exception as e:
-            logging.warning(f"3D visualizer disabled (failed to start): {e}")
-            self.__renderer = None
+        if rc_car_cpp is not None:
+            try:
+                self.__renderer = rc_car_cpp.Renderer3D()
+                # Match the PyQt dark theme (#0b111c)
+                self.__renderer.set_clear_color(0.043, 0.067, 0.110, 1.0)
+            except Exception as e:
+                logging.warning(f"3D visualizer disabled (failed to start): {e}")
+                self.__renderer = None
 
 
     def setVideoSource(self, filePath: str) -> None:
@@ -244,10 +257,12 @@ class VideoStreamer:
 
     def setFrame(self, data: bytes) -> None:
         self.__streamInBuff.push(data)
+        self._newFrameEvent.set()  # Signal that a new frame has arrived
 
 
     def setFrameEth(self, data: bytes) -> None:
         self.__streamInEthBuff.push(data)
+        self._newFrameEvent.set()  # Signal that a new frame has arrived
         
     
     def setRecordingPath(self, path: str) -> None:
@@ -620,13 +635,12 @@ class VideoStreamer:
         receivedFrames = 0
 
         while True:
-            while self.__streamInBuff.empty() and self.__streamInEthBuff.empty():
-                time.sleep(0.001)
-                continue
-
+            self._newFrameEvent.wait()  # Wait until a new frame arrives
             data = self.__streamInBuff.read()
             dataEth = self.__streamInEthBuff.read()
-            if data is None and dataEth is None:
+            
+            self._newFrameEvent.clear()  # Clear the event until the next frame arrives
+            if self.__streamInBuff.empty() and self.__streamInEthBuff.empty():
                 continue
             
             data = data if data is not None else dataEth
@@ -638,13 +652,6 @@ class VideoStreamer:
             frameHdr = FrameHeader.from_buffer_copy(data[:header_size])
             frameType = frameHdr.frameHeader.frameType
             frameSide = frameHdr.frameHeader.frameSide
-            
-            # if frameType == VideoStreamer.FrameTypes.Mono.value:
-            #     ret = self.assembleMonoFrame(data, frameHdr)
-            # elif frameType == VideoStreamer.FrameTypes.Stereo.value:
-            #     ret = self.assembleStereoFrame(data, frameHdr, frameSide)
-            # elif frameType == VideoStreamer.FrameTypes.Disparity.value:
-            #     ret = self.assembleStereoMonoFrame(data, frameHdr)
             ret = self.assembleStereoMonoFrame(data, frameHdr)
 
             if ret == VideoStreamer.Decodestatus.DecodingOK:
@@ -920,7 +927,8 @@ class VideoStreamer:
         self.__segmentMapStereoMono[segID] = bytes(data[payload_start:payload_end])
 
         # we may now decode
-        if len(self.__segmentMapStereoMono) == (self.__expectedSegmentsStereoMono):
+        length = len(self.__segmentMapStereoMono)
+        if length == self.__expectedSegmentsStereoMono:
             decodeRet = self.__decodePointCloudFrame(self.__segmentMapStereoMono)
             self.__segmentMapStereoMono.clear()
             self.__recvFrameIDStereoMono = None
@@ -1177,12 +1185,14 @@ class VideoStreamer:
         if self.__renderer is not None:
             if not self.__rendererOpened:
                 # Open the window
+                self.__renderer.set_cloud_dimensions(cols, rows)
                 self.__renderer.enable_visualizer_window(True)
                 self.__rendererOpened = True
                 self.__3dTimeoutThread = Thread(target=self.__3dTimeoutThreadFunc, daemon=True)
                 self.__3dTimeoutThread.start()
             else:
                 self.__timeoutCounter = 0  # Reset timeout counter on each new frame
+                self.__renderer.set_cloud_dimensions(cols, rows)
                 # points3d = _points3d
                 x = points3d[:, :, 0]
                 y = points3d[:, :, 1]
