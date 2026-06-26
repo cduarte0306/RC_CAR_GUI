@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLineEdit,
     QButtonGroup, QProgressDialog, QTabWidget, QFrame, QComboBox, QDialog, QTabBar, QMessageBox,
     QApplication, QListWidget, QListWidgetItem, QMenu, QSpinBox, QDoubleSpinBox,
-    QFormLayout, QScrollArea, QCheckBox, QSlider, QToolButton
+    QFormLayout, QScrollArea, QCheckBox, QSlider, QToolButton, QStackedWidget
 )
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QIcon, QDrag, QCursor, QAction
 from PyQt6.QtCore import Qt, QMutex, QElapsedTimer, pyqtSignal, QSize, QSettings, QPoint, QMimeData, QPropertyAnimation, QEasingCurve
@@ -14,6 +14,8 @@ import cv2
 os.environ["QT_LOGGING_RULES"] = "*.debug=false; *.warning=false"
 
 import logging
+
+from ui.Open3DEmbedWidget import Open3DEmbedWidget
 
 
 class ButtonDropDown(QPushButton, QSpinBox):
@@ -525,7 +527,63 @@ class VideoStreamingWindow(QWidget):
         self.__videoLabel.setPixmap(placeholder)
         self.__videoLabel.setMinimumHeight(360)
 
-        viewerLayout.addWidget(self.__videoLabel, stretch=1)
+        # Viewer mode toggle: 2D colour frames vs the embedded 3D point cloud.
+        _toggle_style = """
+            QPushButton {
+                background-color: rgba(255,255,255,0.06);
+                color: #e8ecf3;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 10px;
+                padding: 6px 14px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0,210,255,0.14);
+                border: 1px solid rgba(0,210,255,0.32);
+            }
+            QPushButton:checked {
+                background-color: rgba(0,210,255,0.18);
+                border: 1px solid rgba(0,210,255,0.65);
+                color: #0fd3ff;
+            }
+        """
+        viewerModeRow = QHBoxLayout()
+        viewerModeRow.setSpacing(6)
+        self.__viewerModeGroup = QButtonGroup(self)
+        self.__viewerModeGroup.setExclusive(True)
+        self.__viewerModeButtons: dict[str, QPushButton] = {}
+        for mode, label, tip in (
+            ("color", "Color", "Show the 2D camera frames"),
+            ("cloud", "3D Cloud", "Show the live 3D point cloud"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.setStyleSheet(_toggle_style)
+            btn.clicked.connect(lambda checked, m=mode: self.__setViewerMode(m))
+            self.__viewerModeGroup.addButton(btn)
+            self.__viewerModeButtons[mode] = btn
+            viewerModeRow.addWidget(btn)
+        viewerModeRow.addStretch()
+        viewerLayout.addLayout(viewerModeRow)
+
+        # Stacked viewer: page 0 = 2D frames, page 1 = embedded Open3D window.
+        # The window-id provider is injected later via setRenderer3DProvider();
+        # default to 0 so the embed simply waits until it is wired up.
+        self.__renderer3DProvider = lambda: 0
+        self.__view3d = Open3DEmbedWidget(lambda: self.__renderer3DProvider())
+
+        self.__viewerStack = QStackedWidget()
+        self.__viewerStack.addWidget(self.__videoLabel)  # index 0: color
+        self.__viewerStack.addWidget(self.__view3d)      # index 1: 3D cloud
+        viewerLayout.addWidget(self.__viewerStack, stretch=1)
+
+        saved_viewer_mode = self.__settings.value("viewerMode", "color", str)
+        if saved_viewer_mode not in self.__viewerModeButtons:
+            saved_viewer_mode = "color"
+        self.__viewerModeButtons[saved_viewer_mode].setChecked(True)
+        self.__setViewerMode(saved_viewer_mode)
 
         viewer_settings_expanded = self.__settings.value("viewerSettingsExpanded", False, bool)
 
@@ -3021,6 +3079,40 @@ class VideoStreamingWindow(QWidget):
         if emit_signal:
             self.cameraSourceSelected.emit(mode == "calibration")
         self.__resizeControlsPopout()
+
+
+    def __setViewerMode(self, mode: str) -> None:
+        """Switch the viewer between 2D color frames and the embedded 3D cloud."""
+        if mode not in self.__viewerModeButtons:
+            return
+        for key, btn in self.__viewerModeButtons.items():
+            btn.setChecked(key == mode)
+        if mode == "cloud":
+            self.__viewerStack.setCurrentWidget(self.__view3d)
+            # Idempotent: begin polling for the native window if not already.
+            self.__view3d.start()
+        else:
+            self.__viewerStack.setCurrentWidget(self.__videoLabel)
+        self.__settings.setValue("viewerMode", mode)
+
+
+    def setRenderer3DProvider(self, provider) -> None:
+        """Inject the callable that returns the Open3D native window handle.
+
+        `provider` is a zero-arg callable returning the HWND (int), or 0 until
+        the visualizer window exists. Wired from MainWindow to the backend's
+        getRenderer3DWindowId().
+        """
+        self.__renderer3DProvider = provider
+
+
+    def onRenderer3DWindowOpened(self) -> None:
+        """Slot for the backend's renderer3DWindowOpened signal.
+
+        Start polling so the window is embedded as soon as its handle is valid,
+        even if the user has not switched to the 3D view yet.
+        """
+        self.__view3d.start()
 
 
     def __showUploadProgress(self):

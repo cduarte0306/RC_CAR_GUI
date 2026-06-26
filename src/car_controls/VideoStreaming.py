@@ -149,6 +149,7 @@ class VideoStreamer:
     startingVideoTransmission = Signal()         # Emitted when video transmission is starting
     endingVideoTransmission   = Signal()         # Emitted when video transmission is ending
     requestVideoSettings      = Signal(int, int) # Emitted to request video settings from GUI
+    rendererWindowOpened      = Signal()         # Emitted when the 3D visualizer window is (re)opened, so the UI can embed it
     
     class Decodestatus(Enum):
         DecodingOK = 0
@@ -249,6 +250,23 @@ class VideoStreamer:
         if len(videoName) > 128:
             raise ValueError("Source file name exceeds maximum length of 128 characters")
         self.__srcFile = filePath
+
+
+    def getRendererWindowId(self) -> int:
+        """Native window handle (HWND on Windows) of the Open3D 3D visualizer.
+
+        Returns 0 if the renderer is unavailable or its window has not been
+        created yet. The window is created asynchronously after the first point
+        cloud frame, so poll this (e.g. on a QTimer) until it returns non-zero
+        before embedding it with QWindow.fromWinId() / createWindowContainer().
+        """
+        if self.__renderer is None:
+            return 0
+        try:
+            return int(self.__renderer.get_window_id())
+        except Exception as exc:
+            logging.debug("getRendererWindowId failed: %s", exc)
+            return 0
 
 
     def startStream(self, ip: str) -> bool:
@@ -1188,6 +1206,9 @@ class VideoStreamer:
                 self.__renderer.set_cloud_dimensions(cols, rows)
                 self.__renderer.enable_visualizer_window(True)
                 self.__rendererOpened = True
+                # Notify the UI so it can embed the native window. The HWND is
+                # created asynchronously, so listeners must poll getRendererWindowId().
+                self.rendererWindowOpened.emit()
                 self.__3dTimeoutThread = Thread(target=self.__3dTimeoutThreadFunc, daemon=True)
                 self.__3dTimeoutThread.start()
             else:

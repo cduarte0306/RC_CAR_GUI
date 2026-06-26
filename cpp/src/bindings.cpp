@@ -40,7 +40,12 @@ PYBIND11_MODULE(rc_car_cpp, m) {
             "Set the background clear color (RGBA)")
         .def("enable_visualizer_window", &rc_car::Renderer3D::enableVisualizerWindow,
             py::arg("enable") = true,
-            "Enable/disable Open3D visualizer window (only for standalone, not PyQt)");
+            "Enable/disable Open3D visualizer window (only for standalone, not PyQt)")
+        .def("get_window_id", &rc_car::Renderer3D::GetWindowId,
+            "Return the native window handle (HWND on Windows) of the visualizer "
+            "window, or 0 if it has not been created yet. The window is created "
+            "asynchronously after enable_visualizer_window(True), so poll this until "
+            "it returns non-zero, then embed it in Qt via QWindow.fromWinId().");
 
     // Version information
     m.attr("__version__") = "1.0.0";

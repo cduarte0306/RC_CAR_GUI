@@ -938,7 +938,12 @@ class MainWindow(QMainWindow):
         self.__consumer.videoStoredToDevice.connect(self.__streamWindow.showVideoSavedMessage)
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
-        
+
+        # 3D point-cloud view: give the stream window a handle provider and tell
+        # it when the Open3D window opens so it can embed it in the viewer.
+        self.__streamWindow.setRenderer3DProvider(self.__consumer.getRenderer3DWindowId)
+        self.__consumer.renderer3DWindowOpened.connect(self.__streamWindow.onRenderer3DWindowOpened)
+
         self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)

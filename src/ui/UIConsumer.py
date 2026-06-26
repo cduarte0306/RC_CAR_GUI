@@ -54,8 +54,9 @@ class BackendIface(QThread):
     firmwareUpdateState         = pyqtSignal(bool)           # To be called by the backend to notify the UI of the return state of the latest firmware update command (success/failure)
 
     # Status signals
-    videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video   
+    videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video
     videoStoredToDevice         = pyqtSignal()               # Emitted when video is successfully stored on device
+    renderer3DWindowOpened      = pyqtSignal()               # Emitted (on GUI thread) when the Open3D window opens; UI can embed it
     
     # Error signals
     failedToStoreVideoOnDevice  = pyqtSignal(str)  # Emitted when saving video on device fails
@@ -110,6 +111,8 @@ class BackendIface(QThread):
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
+        # Re-emit on the GUI thread (QThread.pyqtSignal) so widgets can be touched safely.
+        self.__videoStreamer.rendererWindowOpened.connect(lambda: self.renderer3DWindowOpened.emit())
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
@@ -148,6 +151,14 @@ class BackendIface(QThread):
 
     def getVideoOutAdapterIp(self) -> str:
         return self.__video_out_adapter_ip
+
+
+    def getRenderer3DWindowId(self) -> int:
+        """Native handle (HWND) of the Open3D 3D window, or 0 if not yet created.
+
+        Poll after `renderer3DWindowOpened` fires until non-zero, then embed.
+        """
+        return self.__videoStreamer.getRendererWindowId()
 
 
     @pyqtSlot(str)
