@@ -15,7 +15,7 @@ from backend.CommandBus import (CamStreamSelectionModes,
                                      Reply,
                                      MotorCommands, UpdaterCommand, val_type_t)
 from backend.CommandBus import UpdaterCommand, CameraCommand
-
+from network.NetworkManager import NetworkManager, NetworkErr
 from enum import Enum
 from dataclasses import dataclass
 import ctypes
@@ -73,6 +73,8 @@ class UpdaterBackend:
         self.updateError     : Signal = Signal()
         self.firmwareAborted : Signal = Signal()
         
+        self._tcpPort = None
+        
         self._threadFuture = None
         self._hashFuture   = None
 
@@ -124,6 +126,34 @@ class UpdaterBackend:
 
         if reply.status() != 1:
             logging.error("Target replied with error. Aborting update")
+            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+            return False
+
+        payload = reply.payload()
+        if payload is None or len(payload) < ctypes.sizeof(ctypes.c_int):
+            logging.error("Invalid TCP port payload in init reply (len=%s)", 0 if payload is None else len(payload))
+            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+            return False
+        
+        # Read the TCP port from the reply
+        tcpPort : int = ctypes.c_int.from_buffer_copy(payload).value
+        
+        if tcpPort <= 0:
+            logging.error("Invalid TCP port received: %s", tcpPort)
+            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+            return False
+
+        try:
+            # Open a TCP client bound to an ephemeral local source port (0),
+            # targeting the destination port provided by the host init reply.
+            self._tcpPort = NetworkManager.openNetworkAdapter(("0.0.0.0", tcpPort, 0), protocol="tcp")
+            logging.info("Opened update TCP adapter on ephemeral source port for destination port %s", tcpPort)
+        except NetworkErr as e:
+            logging.error("Failed opening update TCP adapter on port %s: %s", tcpPort, e)
+            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+            return False
+        except Exception as e:
+            logging.error("Unexpected error opening update TCP adapter: %s", e)
             self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
             return False
             
@@ -262,6 +292,13 @@ class UpdaterBackend:
 
     def _HandleCleanupOnError(self) -> None:
         print("[FSM] Cleanup on Error")
+        if self._tcpPort is not None:
+            try:
+                self._tcpPort.shutdown()
+            except Exception as e:
+                logging.warning("Failed shutting down update TCP adapter: %s", e)
+            finally:
+                self._tcpPort = None
         CameraCommand().ModuleStartStream()
         logging.error("An error occurred during the update process. Performing cleanup.")
         

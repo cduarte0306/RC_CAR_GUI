@@ -1,4 +1,5 @@
 from .udp_client import UDP
+from .tcp_client import TCP
 from threading import Thread
 from utils.utilities import Toolbox, CircularBuffer, Signal
 import logging
@@ -376,6 +377,27 @@ class NetworkManager:
             return None
 
     @staticmethod
+    def openNetworkAdapter(adapterInfo : tuple, protocol: str = "udp", recvCallback=None, recvBuffSize=4096):
+        """
+        Open a network adapter for the selected transport protocol.
+
+        Args:
+            adapterInfo (tuple): Adapter information tuple (local_bind_ip, port) or (local_bind_ip, port, src_port)
+            protocol (str): Transport protocol ("udp" or "tcp")
+            recvCallback (callable, optional): Callback function for received data
+            recvBuffSize (int, optional): Receive buffer size for the socket wrapper. Defaults to 4096.
+
+        Returns:
+            UDP | TCP: The created network adapter
+        """
+        proto = (protocol or "udp").strip().lower()
+        if proto == "udp":
+            return NetworkManager.openUDPAdapter(adapterInfo, recvCallback=recvCallback, recvBuffSize=recvBuffSize)
+        if proto == "tcp":
+            return NetworkManager.openTCPAdapter(adapterInfo, recvCallback=recvCallback, recvBuffSize=recvBuffSize)
+        raise NetworkErr(f"Unsupported protocol '{protocol}'. Expected 'udp' or 'tcp'.")
+
+    @staticmethod
     def openUDPAdapter(adapterInfo : tuple, recvCallback=None, recvBuffSize=4096) -> UDP:
         """
         Opens an adapter to the specified IP
@@ -459,6 +481,72 @@ class NetworkManager:
 
         # Return the underlying UDP adapter (caller expects UDP)
         return udp_adapter
+
+    @staticmethod
+    def openTCPAdapter(adapterInfo : tuple, recvCallback=None, recvBuffSize=4096) -> TCP:
+        """
+        Opens a TCP adapter to the specified port.
+
+        Args:
+            adapterInfo (tuple): Adapter information tuple (local_bind_ip, port) or (local_bind_ip, port, src_port)
+            recvCallback (callable, optional): Callback function for received data
+            recvBuffSize (int, optional): Receive buffer size for the socket wrapper. Defaults to 4096.
+
+        Returns:
+            TCP: The created TCP adapter
+        """
+        srcPort : int = 0
+        if len(adapterInfo) == 2:
+            localIp, dstPort = adapterInfo
+        elif len(adapterInfo) == 3:
+            localIp, dstPort, srcPort = adapterInfo
+        else:
+            raise NetworkErr("Invalid adapter info tuple; expected (local_bind_ip, port)")
+
+        if dstPort is None:
+            raise NetworkErr("Port number must be specified for TCP adapter opening")
+
+        if srcPort is None:
+            srcPort = 0
+
+        adapter_kind = "unknown"
+        if localIp and localIp == _IfaceIps[IfaceId.EthIface.value]:
+            adapter_kind = "eth"
+        elif localIp and localIp == _IfaceIps[IfaceId.WlanIface.value]:
+            adapter_kind = "wlan"
+        elif localIp in (None, "", "0.0.0.0"):
+            adapter_kind = "auto"
+
+        logging.info(
+            "Opening TCP adapter: kind=%s, port=%s, localIp=%s",
+            adapter_kind,
+            dstPort,
+            localIp
+        )
+
+        tcp_adapter = TCP(dstPort)
+        try:
+            bind_ok = tcp_adapter.bindSocket(srcPort, localIp)
+            if not bind_ok:
+                raise NetworkErr(
+                    f"Failed to bind TCP adapter ({adapter_kind}) localIp={localIp} srcPort={srcPort} dstPort={dstPort}"
+                )
+            logging.info(
+                "Bound TCP adapter (%s) to local %s:%s (dest port %s)",
+                adapter_kind,
+                localIp,
+                srcPort,
+                dstPort,
+            )
+        except Exception as e:
+            logging.error("Failed to bind TCP adapter %s", e)
+            raise
+
+        socket_wrapper = Socket(tcp_adapter, recvCallback, recvBuffSize)
+        if recvCallback is not None:
+            socket_wrapper.dataReceived.connect(recvCallback)
+
+        return tcp_adapter
 
     @staticmethod
     def getUDPAdapter(
