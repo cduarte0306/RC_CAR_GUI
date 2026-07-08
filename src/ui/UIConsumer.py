@@ -2,14 +2,16 @@ from html import parser
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer
 from utils.utilities import CircularBuffer
 
-from car_controls.VideoStreaming import VideoStreamer, FrameHeader
-from car_controls.controller import Controller
-from car_controls.CommandBus import (CamStreamSelectionModes,
+from backend.VideoStreaming import VideoStreamer, FrameHeader
+from backend.controller import Controller
+from backend.CommandBus import (CamStreamSelectionModes,
                                      CommandBus, Command, CameraCommand, RcCommands,
                                      Reply,
                                      MotorCommands, UpdaterCommand, val_type_t)
 from network.NetworkManager import NetworkManager
 from network.udp_client import UDP
+
+from backend.UpdaterBackend import UpdaterBackend
 
 import os
 import numpy as np
@@ -50,13 +52,17 @@ class BackendIface(QThread):
     controllerDisconnected      = pyqtSignal()               # Notify UI of controller disconnection
     paramsLoaded                = pyqtSignal(dict)           # Emitted when calibration parameters are loaded
     
+    updaterError                = pyqtSignal()               # Updater error
+    updaterProgress             = pyqtSignal(float)          # Update progress signal
+    updaterFinished             = pyqtSignal()               # Updater finished signal
+    updaterAborted              = pyqtSignal()               # Updater aborted signal
+    
     # Firmware update signals
     firmwareUpdateState         = pyqtSignal(bool)           # To be called by the backend to notify the UI of the return state of the latest firmware update command (success/failure)
 
     # Status signals
     videoListLoaded             = pyqtSignal(str, list)      # Emitted when video list is loaded from device along with the loaded video
     videoStoredToDevice         = pyqtSignal()               # Emitted when video is successfully stored on device
-    renderer3DWindowOpened      = pyqtSignal()               # Emitted (on GUI thread) when the Open3D window opens; UI can embed it
     
     # Error signals
     failedToStoreVideoOnDevice  = pyqtSignal(str)  # Emitted when saving video on device fails
@@ -84,6 +90,7 @@ class BackendIface(QThread):
         self.__controller     : Controller = Controller()
         
         self.__networkMgr = NetworkManager()
+        self.__updaterBacked = UpdaterBackend()
 
         # Telemetry is inbound-only, so listen on all local interfaces rather
         # than tying reception to whichever NIC discovery selected.
@@ -111,12 +118,15 @@ class BackendIface(QThread):
         self.__videoStreamer.frameSentSignal.connect(self.__frameSentCallback)
         self.__videoStreamer.startingVideoTransmission.connect(self.__startingVideoTransmission)
         self.__videoStreamer.endingVideoTransmission.connect(self.__endingVideoTransmission)
-        # Re-emit on the GUI thread (QThread.pyqtSignal) so widgets can be touched safely.
-        self.__videoStreamer.rendererWindowOpened.connect(lambda: self.renderer3DWindowOpened.emit())
         self.__controller.controllerDetected.connect(lambda connType: self.controllerConnected.emit(connType))
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
+
+        self.__updaterBacked.updateProgress.connect(lambda prog: self.updaterProgress.emit(prog))
+        self.__updaterBacked.updateDone.connect(lambda: self.updaterFinished.emit())
+        self.__updaterBacked.updateError.connect(lambda: self.updaterError.emit())
+        self.__updaterBacked.firmwareAborted.connect(lambda: self.updaterAborted.emit())
     
         # Default to disparity (normal) stereo streaming mode
         # self.setCameraSource(False)
@@ -153,12 +163,13 @@ class BackendIface(QThread):
         return self.__video_out_adapter_ip
 
 
-    def getRenderer3DWindowId(self) -> int:
-        """Native handle (HWND) of the Open3D 3D window, or 0 if not yet created.
+    def getRenderer3D(self):
+        """Return the C++ Renderer3D object (or None) for GUI-thread 3D embedding.
 
-        Poll after `renderer3DWindowOpened` fires until non-zero, then embed.
+        The Qt GUI thread drives its window lifecycle (start_window/pump/
+        stop_window/embed_into); the streamer only feeds it point data.
         """
-        return self.__videoStreamer.getRendererWindowId()
+        return self.__videoStreamer.getRenderer()
 
 
     @pyqtSlot(str)
@@ -928,6 +939,10 @@ class BackendIface(QThread):
             logging.error("Failed to enqueue delete video command: %s", exc)
 
 
+    @pyqtSlot(str)
+    def initUpdate(self, fileName : str) -> None:
+        self.__updaterBacked.StartUpdate(fileName)
+
     def getDevices(self) -> list:
         """
         Return the list of devices
@@ -937,6 +952,9 @@ class BackendIface(QThread):
         """
         return self.__devicesPool
 
+    @pyqtSlot()
+    def abortUpdate(self) -> None:
+        self.__updaterBacked.AbortUpdate()
 
     def __ping_loop(self):
         while not self.__pingShutdownEvent.is_set():

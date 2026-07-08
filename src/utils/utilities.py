@@ -2,6 +2,8 @@ import threading
 import logging
 import queue
 import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 class Toolbox:
 
@@ -194,9 +196,62 @@ class Emitter:
         print(f"Setting value to: {new_value}")
         # Emit the signal when the value changes
         self.value_changed.emit(new_value)
-        
-        
+
 class FSM:
-    def __init__(self):
-        self.state = "initial"
-    
+    def __init__(self, retries = None):
+        self._steps: dict[int, tuple[int | None, callable]] = {}
+        self._currStep: int   = None
+        self._lastStep: int   = None
+        self._finished: bool  = False
+        self._maxRetries: int = retries
+        self._numTries: int = 0
+        self._finallyCallback : callable = None
+
+    def registerStep(self, step: int, transition: int = None, callback : callable=None) -> None:
+        if not isinstance(step, int):
+            raise Exception("Step type requires int")
+        if step in self._steps:
+            raise Exception(f"Step {step} already exists")
+        self._steps[step] = (transition, callback)
+        
+    def finally_(self, callback: callable) -> None:
+        self._finallyCallback = callback
+
+    def trigger(self, step: int) -> None:
+        """Enter a step and run its callback.
+        - callback returns True  -> synchronous step, chain immediately
+        - callback returns None  -> async step; some reply callback
+          will call setStep() later to advance
+        """
+        if self._finished: return
+        if step not in self._steps:
+            raise Exception(f"No registered step: {step}")
+        self._lastStep = self._currStep
+        self._currStep = step
+
+        transition, cb = self._steps[step]
+        advance = cb()
+        
+        if self._maxRetries is not None and self._numTries >= self._maxRetries:
+            self._finished = True
+            return
+
+        if advance is True and transition is not None:
+            self._numTries = 0
+            self.trigger(transition)
+        elif not advance:
+            self._numTries += 1
+        elif transition is None:
+            print("FSM finished")
+            self._finished = True
+            if self._finallyCallback is not None:
+                self._finallyCallback()
+
+    def setStep(self, step: int) -> None:
+        """Call this from a reply/ack callback once async work for the
+        current step is done — this IS the transition."""
+        self.trigger(step)
+
+    def kill(self) -> None:
+        self._currStep = None
+        self._finished = True

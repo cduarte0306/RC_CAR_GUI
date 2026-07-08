@@ -1,3 +1,5 @@
+from urllib import request
+
 from PyQt6.QtWidgets import (
     QWidget,
     QLabel,
@@ -8,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QTextEdit,
+    QDialog
 )
 
 from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent
@@ -19,6 +22,8 @@ import utils.utilities as utils
 from threading import Event
 import logging
 from enum import Enum, auto
+import configparser
+import os
 
 class FirmwareUpdateWindow(QWidget):
     
@@ -33,11 +38,12 @@ class FirmwareUpdateWindow(QWidget):
     stacked layout or shown in a dialog). No backend logic is included —
     the UI emits `initUpdate` when the user triggers an install.
     """
-    initUpdate          = pyqtSignal(int, str)    # Initiate firmware update with given file path
+    initUpdate          = pyqtSignal(str)    # Initiate firmware update with given file path
     sendFileChunk       = pyqtSignal(int, bytes)  # Emit a chunk of the firmware file for transfer to the device
     verifyFile          = pyqtSignal(int, object) # Verify the firmware file before starting the update (emits file path, size, and hash for verification by backend)
     cmdInstall          = pyqtSignal(int, )       # Command to start the installation process after file transfer is complete
     requestInstallState = pyqtSignal(int, )       # Request current installation state (for UI sync on startup or after reconnecting to device)
+    requestCancel       = pyqtSignal()       # Request to cancel the ongoing firmware update
    
     class ReplyWorker(QThread):      
         doNext = pyqtSignal(int) # Signal to trigger processing of the next reply in the buffer (used to wake the thread when a new reply arrives)
@@ -50,7 +56,7 @@ class FirmwareUpdateWindow(QWidget):
         def kill(self):
             self._canRun = False
             self._replyCircBuff.flush() # Unblock the thread if it's waiting on an empty buffer
-            
+
         def OnVerifyResult(self, data):
             logging.info(f"Received VERIFY_RESULT reply: {data}")
 
@@ -80,10 +86,10 @@ class FirmwareUpdateWindow(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(120)
-
         self._file_path = ""
+        self._config_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "config", "rc-car-viewer-config.ini")
+        )
 
         self.setAcceptDrops(True)
         self.setMinimumWidth(640)
@@ -95,6 +101,27 @@ class FirmwareUpdateWindow(QWidget):
         self._replyCircBuff = utils.CircularBuffer(10) # Buffer for incoming device replies related to firmware update process
         
         self._procReplyThread = self.ReplyWorker(self._replyCircBuff)
+        self._restore_persisted_file_path()
+
+
+    def _restore_persisted_file_path(self) -> None:
+        """Restore previously selected firmware file path from config."""
+        parser = configparser.ConfigParser()
+        parser.read(self._config_path)
+        last_path = parser.get("settings", "firmware_path", fallback="").strip()
+        if last_path:
+            self._set_file(last_path)
+
+
+    def _persist_file_path(self, path: str) -> None:
+        """Persist selected firmware file path to config."""
+        parser = configparser.ConfigParser()
+        parser.read(self._config_path)
+        if not parser.has_section("settings"):
+            parser.add_section("settings")
+        parser.set("settings", "firmware_path", path)
+        with open(self._config_path, "w", encoding="utf-8") as cfg:
+            parser.write(cfg)
 
 
     def _build_ui(self) -> None:
@@ -165,7 +192,7 @@ class FirmwareUpdateWindow(QWidget):
         file_row = QHBoxLayout()
 
         self._file_edit = QLineEdit()
-        self._file_edit.setPlaceholderText("Select firmware file (.bin, .hex, .uf2, .zip)")
+        self._file_edit.setPlaceholderText("Select firmware file (.swu)")
         self._file_edit.setReadOnly(True)
 
         self._browse_btn = QPushButton("Browse")
@@ -238,15 +265,13 @@ class FirmwareUpdateWindow(QWidget):
         self._browse_btn.clicked.connect(self._on_browse)
         self._start_btn.clicked.connect(self._on_start)
         self._cancel_btn.clicked.connect(self._on_cancel)
-        self._timer.timeout.connect(self._on_timer)
-
 
     def _on_browse(self) -> None:
         """Open a file dialog and accept a firmware file."""
 
         dialog = QFileDialog(self)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
-        dialog.setNameFilter("Firmware Files (*.bin *.hex *.uf2 *.zip)")
+        dialog.setNameFilter("Firmware Files (*.swu)")
 
         if dialog.exec():
             files = dialog.selectedFiles()
@@ -260,6 +285,7 @@ class FirmwareUpdateWindow(QWidget):
         self._file_path = path
         self._file_edit.setText(path)
         self._start_btn.setEnabled(True)
+        self._persist_file_path(path)
         # Clear previous notes — front-end only; real notes would be parsed from package
         self._notes.setPlainText("Release notes: (preview not available")
 
@@ -270,44 +296,22 @@ class FirmwareUpdateWindow(QWidget):
         if not self._file_path:
             self._set_status("No firmware selected.")
             return
-
-        self._start_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
         self._progress.setValue(0)
         self._set_status("Preparing update…")
-        self._timer.start()
-        self._procReplyThread.start() # Start thread to process incoming device replies related to firmware update process
         logging.info(f"Emitting initUpdate signal with file path: {self._file_path}")
+        
+        # Persist the selected file path for the backend to access
         self.initUpdate.emit(self._file_path) # Emit signal to trigger backend update process (
 
 
     def _on_cancel(self) -> None:
         """Cancel a running simulated install."""
 
-        if self._timer.isActive():
-            self._timer.stop()
-
         self._progress.setValue(0)
         self._start_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
-        self._set_status("Update cancelled.")
-
-
-    def _on_timer(self) -> None:
-        """Timer tick: advance simulated progress and finish when complete."""
-
-        value = self._progress.value() + 3
-        if value >= 100:
-            self._timer.stop()
-            self._progress.setValue(100)
-            self._cancel_btn.setEnabled(False)
-            self._set_status("Update completed successfully.")
-            # Emit installRequested so host can hook a backend if desired
-            self.installRequested.emit(self._file_path)
-            return
-
-        self._progress.setValue(value)
-        self._set_status(f"Updating… {value}%")
+        self.requestCancel.emit()
 
 
     def _set_status(self, text: str) -> None:
@@ -352,3 +356,19 @@ class FirmwareUpdateWindow(QWidget):
         path = urls[0].toLocalFile()
         if path:
             self._set_file(path)
+
+
+    def setProgress(self, prog : float) -> None:
+        self._set_status("Downloading firmware...")
+        self._progress.setValue(int(prog))
+
+    def OnFwError(self) -> None:
+        logging.error("Detected error during firmware update")    
+    
+    def OnFwFinished(self) -> None:
+        logging.info("Firmware update finished!")
+
+    def OnFwAborted(self) -> None:
+        logging.info("Firmware update aborted.")
+        self._progress.setValue(0)
+        self._set_status("Update cancelled.")

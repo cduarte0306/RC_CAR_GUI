@@ -41,6 +41,17 @@ public:
     void enableVisualizerWindow(bool enable = true);
     std::uintptr_t GetWindowId() const;
 
+    // GUI-thread-driven lifecycle for embedding the window inside Qt.
+    // startWindow(), pump() and stopWindow() MUST all be called from the same
+    // thread (the Qt GUI thread). Creating and pumping the window on the GUI
+    // thread keeps the native window owned by that thread, so reparenting it via
+    // embedInto()/SetParent does not cross threads (which is what caused the
+    // input-queue attachment freeze and the window churn).
+    bool startWindow();   // Create the window + geometry. Idempotent. Returns success.
+    bool pump();          // One PollEvents()/UpdateRender() step. False if window closed.
+    void stopWindow();    // Destroy the window. Idempotent.
+    void embedInto(std::uintptr_t parentHandle);  // Reparent as WS_CHILD of parentHandle (HWND).
+
     // Optional: expensive surface reconstruction from point cloud.
     // Disabled by default because reconstruction can be costly.
     void setMeshReconstructionEnabled(bool enable);
@@ -104,6 +115,10 @@ private:
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> visualizerEnabled_{false};
     std::atomic<bool> viewInitialized_{false};
+
+    // GUI-thread embedded-window state (see startWindow/pump/stopWindow).
+    std::uintptr_t windowHandle_ = 0;       // Native handle of the visualizer window (0 if none).
+    std::atomic<bool> windowActive_{false};
 
     // Mesh reconstruction worker state.
     std::atomic<bool> meshStopRequested_{false};

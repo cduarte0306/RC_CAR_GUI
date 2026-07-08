@@ -9,7 +9,7 @@ import Defines
 from network.udp_client import UDP
 from utils.utilities import Signal
 
-from network.NetworkManager import NetworkManager
+from network.NetworkManager import MAX_UDP, NetworkManager
 import inspect
 import asyncio
 
@@ -171,7 +171,7 @@ class Command(ctypes.Structure):
         ("ack",        ctypes.c_uint8),  # Does this message expect an ack?
     ]
     
-    def __init__(self, *args, socket=None, **kwargs):
+    def __init__(self, *args, socket=None, timeout:int=-1, **kwargs):
         super().__init__(*args, **kwargs)
         self._payload : bytes = b''
         self._replyCallback : callable = None # Optional callback for replies
@@ -180,6 +180,7 @@ class Command(ctypes.Structure):
         self._sequence_id : int = None  # To track the sequence ID for matching replies
         # Take reference to socket if needed for sending commands directly from the command instance
         self._socket = socket
+        self._timeout = timeout
 
     def __str__(self) -> str:
         return self.__class__.__name__
@@ -499,11 +500,12 @@ class CameraCommand(Command):
         self.status = data.get("status") 
 
 class UpdaterCommand(Command):
-    CmdInitUpdate    = 0
-    CmdWriteFileData = 1
-    CmdVerifyFile    = 2
-    CmdApplyUpdate   = 3
-        
+    CmdInitUpdate    = 1
+    CmdWriteFileData = 2
+    CmdVerifyFile    = 3
+    CmdInstallUpdate = 4
+    CmdReboot        = 5
+
     _pack_ = 1
     _fields_ = [
         ("command", ctypes.c_uint8),
@@ -511,21 +513,32 @@ class UpdaterCommand(Command):
         ("payloadLen", ctypes.c_uint32),
     ]
     
-    def __init__(self, *args, socket=None, **kwargs):
+    def __init__(self, *args, socket=None, blocking=None, **kwargs):
         super().__init__(*args, socket=socket, **kwargs)
+        self._blocking = blocking
         self.moduleId = ModuleIDs.UpdaterModule.value
         
-    def ModuleInitUpdate(self, replyCallback: callable = None) -> None:
-        pass
+    @staticmethod
+    def GetMaxPayload() -> int:
+        return MAX_UDP - ctypes.sizeof(UpdaterCommand)
+        # return 32768 - ctypes.sizeof(UpdaterCommand)
+        
+    def ModuleInitUpdate(self, replyCallback: callable = None, fileName : str = "") -> None:
+        payload = fileName.encode('utf-8')
+        logging.info("Initializing update with file: %s", fileName)
+        self.dispatchCommand(self.CmdInitUpdate, 0, payload=payload, replyCallback=replyCallback)
+
+    def ModuleWriteFileData(self, file_data: bytes, replyCallback: callable = None, blocking=False) -> None:
+        # logging.debug("Writing file data of length: %d", len(file_data))
+        self.dispatchCommand(self.CmdWriteFileData, 0, payload=file_data, replyCallback=replyCallback)
     
-    def ModuleWriteFileData(self, file_data: bytes, replyCallback: callable = None) -> None:
-        pass
+    def ModuleVerifyFile(self, hash : ctypes.c_uint64, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Verifying file with hash: %s", hash)
+        self.dispatchCommand(self.CmdVerifyFile, 0, replyCallback=replyCallback)
     
-    def ModuleVerifyFile(self, replyCallback: callable = None) -> None:
-        pass
-    
-    def ModuleApplyUpdate(self, replyCallback: callable = None) -> None:
-        pass
+    def ModuleApplyUpdate(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Applying update")
+        self.dispatchCommand(self.CmdInstallUpdate, 0, replyCallback=replyCallback)
     
     def getBytes(self) -> bytes:
         # Implement serialization logic specific to updater commands if needed
@@ -633,6 +646,15 @@ class CommandBus:
         # if isinstance(cmd, tuple):
         self._queue.put(cmd)
 
+    def xmit(self, cmd : Command, timeout : int = 0) -> None:
+        """ Blocks until reply """
+        ok = NetworkManager.write2Port(
+            self._cmdPipeSockFd,
+            cmd.getBytes()
+        )
+        if not ok:
+            raise Exception(f"Failed to transmit command: {cmd.command}")
+
 
     def processReply(self, raw: bytes) -> None:
         """
@@ -668,7 +690,7 @@ class CommandBus:
             logging.debug("Reply ID %d was not recognized", seqID)
             return
 
-        logging.info(
+        logging.debug(
             "Received reply for command with sequence ID %d: commandID=%d, status=%d, payloadLen=%d",
             seqID,
             reply.commandID(),

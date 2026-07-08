@@ -938,11 +938,16 @@ class MainWindow(QMainWindow):
         self.__consumer.videoStoredToDevice.connect(self.__streamWindow.showVideoSavedMessage)
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
+        
+        # Updater signals to window
+        self.__consumer.updaterProgress.connect(lambda prog: self.__fwWindow.setProgress(prog))
+        self.__consumer.updaterError.connect(self.__fwWindow.OnFwError)
+        self.__consumer.updaterFinished.connect(self.__fwWindow.OnFwFinished)
+        self.__consumer.updaterAborted.connect(self.__fwWindow.OnFwAborted)
 
-        # 3D point-cloud view: give the stream window a handle provider and tell
-        # it when the Open3D window opens so it can embed it in the viewer.
-        self.__streamWindow.setRenderer3DProvider(self.__consumer.getRenderer3DWindowId)
-        self.__consumer.renderer3DWindowOpened.connect(self.__streamWindow.onRenderer3DWindowOpened)
+        # 3D point-cloud view: give the stream window the renderer object so it
+        # can create/embed/pump the Open3D window on the GUI thread.
+        self.__streamWindow.setRenderer3DProvider(self.__consumer.getRenderer3D)
 
         self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
@@ -977,9 +982,8 @@ class MainWindow(QMainWindow):
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
         
         # Firmware update signals (Window <-> Backend)
-        # self.__fwWindow.initUpdate.connect(None) # Placeholder
-        # self.__fwWindow.sendFileChunk.connect(None)
-        # self.__fwWindow.verifyFile.connect(None)
+        self.__fwWindow.initUpdate.connect(self.__consumer.initUpdate) # Placeholder
+        self.__fwWindow.requestCancel.connect(self.__consumer.abortUpdate) # Connect the cancel request signal to the consumer's abort update method
 
 
     def __routeTlm(self, raw_payload : bytes) -> None:

@@ -118,15 +118,38 @@ class UDP:
             logging.debug("Server IP not set. Cannot send data.")
             return False
 
-        try:
-            self.__socket.sendto(data, (dest_ip, self.__dstPort))
-            if self.__broadcast_enabled:
-                self.__replyingSrvAddr = (dest_ip, self.__dstPort)
-        except Exception as e:
-            logging.error("Failed to send UDP data: %s", e)
-            return False
+        max_tries = 5
+        for attempt in range(1, max_tries + 1):
+            try:
+                self.__socket.sendto(data, (dest_ip, self.__dstPort))
+                if self.__broadcast_enabled:
+                    self.__replyingSrvAddr = (dest_ip, self.__dstPort)
+                return True
+            except BlockingIOError as e:
+                # Non-blocking socket send queue is temporarily full.
+                if attempt < max_tries:
+                    # Wait briefly for socket writability, then retry.
+                    select.select([], [self.__socket], [], 0.01 * attempt)
+                    continue
+                logging.error("Failed to send UDP data after retries (would-block): %s", e)
+                return False
+            except OSError as e:
+                # On Windows this may surface as WinError 10035 / errno WSAEWOULDBLOCK.
+                win_err = getattr(e, "winerror", None)
+                errno_val = getattr(e, "errno", None)
+                if win_err == 10035 or errno_val in (socket.EWOULDBLOCK, getattr(socket, "WSAEWOULDBLOCK", 10035)):
+                    if attempt < max_tries:
+                        select.select([], [self.__socket], [], 0.01 * attempt)
+                        continue
+                    logging.error("Failed to send UDP data after retries (would-block): %s", e)
+                    return False
+                logging.error("Failed to send UDP data: %s", e)
+                return False
+            except Exception as e:
+                logging.error("Failed to send UDP data: %s", e)
+                return False
         
-        return True
+        return False
 
 
     def receive_data(self, size : int = 65507) -> bytes | None:

@@ -569,9 +569,10 @@ class VideoStreamingWindow(QWidget):
         viewerLayout.addLayout(viewerModeRow)
 
         # Stacked viewer: page 0 = 2D frames, page 1 = embedded Open3D window.
-        # The window-id provider is injected later via setRenderer3DProvider();
-        # default to 0 so the embed simply waits until it is wired up.
-        self.__renderer3DProvider = lambda: 0
+        # The renderer provider is injected later via setRenderer3DProvider();
+        # default to None so the embed simply waits until it is wired up.
+        self.__viewerMode = "color"
+        self.__renderer3DProvider = lambda: None
         self.__view3d = Open3DEmbedWidget(lambda: self.__renderer3DProvider())
 
         self.__viewerStack = QStackedWidget()
@@ -3085,34 +3086,30 @@ class VideoStreamingWindow(QWidget):
         """Switch the viewer between 2D color frames and the embedded 3D cloud."""
         if mode not in self.__viewerModeButtons:
             return
+        self.__viewerMode = mode
         for key, btn in self.__viewerModeButtons.items():
             btn.setChecked(key == mode)
         if mode == "cloud":
             self.__viewerStack.setCurrentWidget(self.__view3d)
-            # Idempotent: begin polling for the native window if not already.
+            # Create + embed + pump the Open3D window (GUI thread).
             self.__view3d.start()
         else:
             self.__viewerStack.setCurrentWidget(self.__videoLabel)
+            # Destroy the Open3D window while it's not visible to free the GPU.
+            self.__view3d.stop()
         self.__settings.setValue("viewerMode", mode)
 
 
     def setRenderer3DProvider(self, provider) -> None:
-        """Inject the callable that returns the Open3D native window handle.
+        """Inject the callable that returns the C++ Renderer3D object.
 
-        `provider` is a zero-arg callable returning the HWND (int), or 0 until
-        the visualizer window exists. Wired from MainWindow to the backend's
-        getRenderer3DWindowId().
+        `provider` is a zero-arg callable returning the Renderer3D (or None).
+        Wired from MainWindow to the backend's getRenderer3D(). If the user is
+        already on the 3D view, start it now that the renderer is available.
         """
         self.__renderer3DProvider = provider
-
-
-    def onRenderer3DWindowOpened(self) -> None:
-        """Slot for the backend's renderer3DWindowOpened signal.
-
-        Start polling so the window is embedded as soon as its handle is valid,
-        even if the user has not switched to the 3D view yet.
-        """
-        self.__view3d.start()
+        if self.__viewerMode == "cloud":
+            self.__view3d.start()
 
 
     def __showUploadProgress(self):

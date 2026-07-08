@@ -43,9 +43,18 @@ PYBIND11_MODULE(rc_car_cpp, m) {
             "Enable/disable Open3D visualizer window (only for standalone, not PyQt)")
         .def("get_window_id", &rc_car::Renderer3D::GetWindowId,
             "Return the native window handle (HWND on Windows) of the visualizer "
-            "window, or 0 if it has not been created yet. The window is created "
-            "asynchronously after enable_visualizer_window(True), so poll this until "
-            "it returns non-zero, then embed it in Qt via QWindow.fromWinId().");
+            "window, or 0 if no window is currently open.")
+        .def("start_window", &rc_car::Renderer3D::startWindow,
+            "Create the Open3D window on the CALLING thread. Call from the Qt GUI "
+            "thread so the window is owned by it. Idempotent; returns success.")
+        .def("pump", &rc_car::Renderer3D::pump,
+            "Run one render/poll step. Call repeatedly from a QTimer on the GUI "
+            "thread. Returns False once the window has closed.")
+        .def("stop_window", &rc_car::Renderer3D::stopWindow,
+            "Destroy the Open3D window. Call from the same (GUI) thread that created it.")
+        .def("embed_into", &rc_car::Renderer3D::embedInto, py::arg("parent_handle"),
+            "Reparent the Open3D window as a WS_CHILD of the given native parent "
+            "handle (HWND), filling its client area. Re-call on resize.");
 
     // Version information
     m.attr("__version__") = "1.0.0";

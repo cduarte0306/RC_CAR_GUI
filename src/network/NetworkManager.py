@@ -41,9 +41,12 @@ _IfaceIps[IfaceId.WlanIface.value] = None
 _IfaceIps[IfaceId.EthIface.value] = None
 
 _RemoteIps[IfaceId.WlanIface.value] = None
-_RemoteIps[IfaceId.EthIface ] = None
+_RemoteIps[IfaceId.EthIface.value] = None
 _wlanSockOpenReqQueue = Queue(maxsize=50)
 _ethSockOpenReqQueue = Queue(maxsize=50)
+
+# Maximum UDP payload size for IPv4: 65535 - 20 byte IP header - 8 byte UDP header.
+MAX_UDP = 65507
 
 
 class Socket:
@@ -78,17 +81,14 @@ class NetworkErr(Exception):
 class NetworkManager:
     hostDiscovered = Signal(str)
     dataReceived = Signal()
-    
+
     def __init__(self):
         self.__threadPool = ThreadPoolExecutor(max_workers=10)
         self.__searchHostWlanFuture = None
-        self.__ethHandshakeFuture = None
-        self.__openWlanQueueFuture = None
-        self.__openEthQueueFuture = None
-        self.__shutdownEvent       = Event()
-        self.__wlanDiscoveredEvent = Event()
+        self.__shutdownEvent         = Event()
+        self.__wlanDiscoveredEvent   = Event()
         self.__wlanQueueDrainedEvent = Event()
-        self.__ethDiscoveredEvent  = Event()         
+        self.__ethDiscoveredEvent    = Event()         
         self.__ethCreated : bool = False
 
     def __searchHostWlan(self):
@@ -106,43 +106,6 @@ class NetworkManager:
         self.__wlanDiscoveredEvent.set()
         self.hostDiscovered.emit(ip)
 
-        # # Create queued WLAN sockets in this discovery thread before notifying listeners.
-        # while not self.__shutdownEvent.is_set():
-        #     try:
-        #         req : SockReq = _wlanSockOpenReqQueue.get()
-        #     except Empty:
-        #         continue
-
-        #     try:
-        #         wlan_ip = _IfaceIps[IfaceId.WlanIface.value]
-        #         remote_wlan_ip = _RemoteIps[IfaceId.WlanIface.value]
-        #         if wlan_ip is None or remote_wlan_ip is None:
-        #             _wlanSockOpenReqQueue.put(req)
-        #             continue
-
-        #         wlan = NetworkManager.openUDPAdapter(
-        #             (req.port, wlan_ip, remote_wlan_ip), 
-        #             recvCallback=req.callback,
-        #             recvBuffSize=req.bufferSize,
-        #         )
-
-        #         name = " " + req.name if req.name else ""
-        #         if req.sockDesc < len(_socketList):
-        #             iface_list = _socketList[req.sockDesc]
-        #             iface_list[IfaceId.WlanIface.value] = wlan
-        #             logging.info("Opened WLAN UDP adapter'%s' for port %s with descriptor %s", name, req.port, req.sockDesc)
-        #         else:
-        #             logging.error("Invalid WLAN socket descriptor %s for port %s", req.sockDesc, req.port)
-        #     except Exception as exc:
-        #         logging.error("Failed to open queued WLAN UDP adapter '%s' on port %s: %s", name, req.port, exc)
-        #     finally:
-        #         try:
-        #             _wlanSockOpenReqQueue.task_done()
-        #         except Exception:
-        #             pass
-
-        # self.__wlanQueueDrainedEvent.set()
-
     def startDiscovery(self) -> None:
         """
         Start the host discovery service
@@ -152,9 +115,6 @@ class NetworkManager:
             self.__wlanQueueDrainedEvent.clear()
             # Add to thread pool and start the thread
             self.__searchHostWlanFuture = self.__threadPool.submit(self.__searchHostWlan)
-            
-        # Now we start the handshake for eth using the newly discovered eth IP
-        # self.__ethHandshakeFuture = self.__threadPool.submit(self.__ethHandshakeHandler)
 
     def StartConnection(self, hostIP : str, onDeviceConnected: callable = None) -> None:
         import ipaddress
@@ -169,7 +129,7 @@ class NetworkManager:
             logging.error("Invalid host IP address: %s", hostIP)
             return
         self.__threadPool.submit(self.__wlanHandshakeHandler, hostIP, onDeviceConnected)
-    
+
     def __wlanHandshakeHandler(self, hostIP: str, onDeviceConnected: callable = None) -> None:
         """
         WLAN handshake service
@@ -606,11 +566,45 @@ class NetworkManager:
             logging.info("Registered new UDP adapter descriptor %s for port %s", desc, dstPort)
             
         return desc
-            
+    
+    @staticmethod
+    def write2PortSynch(
+        desc : int,   # Descriptor
+        data : bytes,  # Data to be sent
+        timeout : int = -1
+    ) -> bytes:
+        """
+        Write data to opened port and block until reply
+
+        Args:
+            desc (int): _description_
+
+        Returns:
+            bytes: Reply in bytes
+        """
+        if desc < 0 or desc >= len(_socketList):
+            logging.error("Unrecognized socket descriptor")
+            return False
+
+        dstIp = ""
+        ifaceList : tuple = _socketList[desc]
+        ethAdapter : UDP  = ifaceList[IfaceId.EthIface.value]
+        if ethAdapter != None:  # We prefer Ethernet when available, so send through it if possible
+            dstIp = _RemoteIps[IfaceId.EthIface.value]
+            ethAdapter.send(data, dstIp)
+            return True
+
+        # No Ethernet available, send through Wi-Fi if possible
+        wlanAdapter : UDP = ifaceList[IfaceId.WlanIface.value]
+        dstIp = _RemoteIps[IfaceId.WlanIface.value]
+        if wlanAdapter is None: raise NetworkErr("No valid adapter found for writing")
+        return wlanAdapter.send(data, dstIp)
+
     @staticmethod
     def write2Port(
         desc : int,   # Descriptor
-        data : bytes  # Data to be sent
+        data : bytes,  # Data to be sent
+        timeout : int = -1
     ) -> bool:
         """
         Write data to opened port

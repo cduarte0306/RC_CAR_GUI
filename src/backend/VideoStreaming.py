@@ -149,8 +149,7 @@ class VideoStreamer:
     startingVideoTransmission = Signal()         # Emitted when video transmission is starting
     endingVideoTransmission   = Signal()         # Emitted when video transmission is ending
     requestVideoSettings      = Signal(int, int) # Emitted to request video settings from GUI
-    rendererWindowOpened      = Signal()         # Emitted when the 3D visualizer window is (re)opened, so the UI can embed it
-    
+
     class Decodestatus(Enum):
         DecodingOK = 0
         DecodingIncomplete = auto()
@@ -229,12 +228,10 @@ class VideoStreamer:
         
         self.__lastSegId = 0
 
-        # 3D point cloud visualizer (Open3D). The C++ side owns a dedicated render thread so
-        # VideoStreamer can safely push point data from its worker thread.
+        # 3D point cloud visualizer (Open3D). The Qt GUI thread owns the window
+        # lifecycle (start_window/pump/stop_window); this streamer pushes point
+        # data into the renderer's thread-safe buffer from its worker thread.
         self.__renderer = None
-        self.__3dTimeoutThread = None  # Create on demand
-        self.__rendererOpened = False
-        self.__timeoutCounter : int = 0
         if rc_car_cpp is not None:
             try:
                 self.__renderer = rc_car_cpp.Renderer3D()
@@ -252,21 +249,13 @@ class VideoStreamer:
         self.__srcFile = filePath
 
 
-    def getRendererWindowId(self) -> int:
-        """Native window handle (HWND on Windows) of the Open3D 3D visualizer.
+    def getRenderer(self):
+        """Return the C++ Renderer3D object (or None if the module isn't built).
 
-        Returns 0 if the renderer is unavailable or its window has not been
-        created yet. The window is created asynchronously after the first point
-        cloud frame, so poll this (e.g. on a QTimer) until it returns non-zero
-        before embedding it with QWindow.fromWinId() / createWindowContainer().
+        The Qt GUI thread drives its window lifecycle (start_window/pump/
+        stop_window/embed_into); this streamer only feeds it point data.
         """
-        if self.__renderer is None:
-            return 0
-        try:
-            return int(self.__renderer.get_window_id())
-        except Exception as exc:
-            logging.debug("getRendererWindowId failed: %s", exc)
-            return 0
+        return self.__renderer
 
 
     def startStream(self, ip: str) -> bool:
@@ -593,19 +582,6 @@ class VideoStreamer:
 
         self.__sendFrameID += 1
         
-
-    def __3dTimeoutThreadFunc(self) -> None:
-        while True:
-            self.__timeoutCounter += 1
-
-            if self.__timeoutCounter >= 10:
-                self.__timeoutCounter = 0
-                if self.__renderer is not None:
-                    self.__renderer.enable_visualizer_window(False)
-                    self.__rendererOpened = False
-                    break
-            time.sleep(0.1)
-
 
     def __streamOutThread(self) -> None:
         self.startingVideoTransmission.emit()
@@ -1199,69 +1175,56 @@ class VideoStreamer:
                 # else:
                 #     self.__recordDisparity(frame)
 
-        # Renderer state 
+        # Feed the 3D renderer's thread-safe buffer. The GUI thread now owns the
+        # window lifecycle (start_window/pump/stop_window via Open3DEmbedWidget);
+        # here we only push the latest points regardless of whether a window is
+        # currently open, so when the user shows the 3D view it has fresh data.
         if self.__renderer is not None:
-            if not self.__rendererOpened:
-                # Open the window
-                self.__renderer.set_cloud_dimensions(cols, rows)
-                self.__renderer.enable_visualizer_window(True)
-                self.__rendererOpened = True
-                # Notify the UI so it can embed the native window. The HWND is
-                # created asynchronously, so listeners must poll getRendererWindowId().
-                self.rendererWindowOpened.emit()
-                self.__3dTimeoutThread = Thread(target=self.__3dTimeoutThreadFunc, daemon=True)
-                self.__3dTimeoutThread.start()
-            else:
-                self.__timeoutCounter = 0  # Reset timeout counter on each new frame
-                self.__renderer.set_cloud_dimensions(cols, rows)
-                # points3d = _points3d
-                x = points3d[:, :, 0]
-                y = points3d[:, :, 1]
-                finite_xyz = np.isfinite(x) & np.isfinite(y) & np.isfinite(Z)
-                pc_mask = (
-                    base_valid
-                    & finite_xyz
-                    & (Z > 0.01)
-                    & (Z < 5.0)
-                    & (np.abs(x) < 12.0)
-                    & (np.abs(y) < 8.0)
-                )
+            self.__renderer.set_cloud_dimensions(cols, rows)
+            x = points3d[:, :, 0]
+            y = points3d[:, :, 1]
+            finite_xyz = np.isfinite(x) & np.isfinite(y) & np.isfinite(Z)
+            pc_mask = (
+                base_valid
+                & finite_xyz
+                & (Z > 0.01)
+                & (Z < 5.0)
+                & (np.abs(x) < 12.0)
+                & (np.abs(y) < 8.0)
+            )
+            pts_xyz = points3d[pc_mask]
+            if pts_xyz.size == 0:
+                pc_mask = base_valid & finite_xyz
                 pts_xyz = points3d[pc_mask]
-                if pts_xyz.size == 0:
-                    pc_mask = base_valid & finite_xyz
-                    pts_xyz = points3d[pc_mask]
 
-                pts_xyz = pts_xyz.astype(np.float32, copy=False)
-                pts_xyz = np.ascontiguousarray(pts_xyz)
+            pts_xyz = pts_xyz.astype(np.float32, copy=False)
+            pts_xyz = np.ascontiguousarray(pts_xyz)
 
-                # Extract matching color data if available
-                pts_rgb = None
-                if has_color:
-                    pts_rgb = color3d[pc_mask]
+            # Extract matching color data if available
+            pts_rgb = None
+            if has_color:
+                pts_rgb = color3d[pc_mask]
 
+            n_points = int(pts_xyz.shape[0])
+
+            max_points = 200_000
+            if n_points > max_points:
+                step = max(1, n_points // max_points)
+                pts_xyz = pts_xyz[::step]
+                if pts_rgb is not None:
+                    pts_rgb = pts_rgb[::step]
                 n_points = int(pts_xyz.shape[0])
 
-                max_points = 200_000
-                if n_points > max_points:
-                    step = max(1, n_points // max_points)
-                    pts_xyz = pts_xyz[::step]
-                    if pts_rgb is not None:
-                        pts_rgb = pts_rgb[::step]
-                    n_points = int(pts_xyz.shape[0])
-
-                if n_points > 0:
-                    pc_bytes = pts_xyz.view(np.uint8)
-                    if pts_rgb is not None:
-                        # Convert float32 RGB (0-255) to uint32 to match C++ PointRGB struct
-                        pts_rgb = np.clip(pts_rgb, 0, 255).astype(np.uint32)
-                        pts_rgb = np.ascontiguousarray(pts_rgb)
-                        rgb_bytes = pts_rgb.view(np.uint8)
-                        self.__renderer.setPointCloudColorData(pc_bytes, rgb_bytes, n_points)
-                    else:
-                        self.__renderer.setPointCloudData(pc_bytes, n_points)
+            if n_points > 0:
+                pc_bytes = pts_xyz.view(np.uint8)
+                if pts_rgb is not None:
+                    # Convert float32 RGB (0-255) to uint32 to match C++ PointRGB struct
+                    pts_rgb = np.clip(pts_rgb, 0, 255).astype(np.uint32)
+                    pts_rgb = np.ascontiguousarray(pts_rgb)
+                    rgb_bytes = pts_rgb.view(np.uint8)
+                    self.__renderer.setPointCloudColorData(pc_bytes, rgb_bytes, n_points)
                 else:
-                    # If no point cloud frames received in over a period of time  
-                    pass
+                    self.__renderer.setPointCloudData(pc_bytes, n_points)
 
 
         self.__frameBufferStereoMono.push((display_frame, (stereoDatas.gyroX, stereoDatas.gyroY, stereoDatas.gyroZ)))
