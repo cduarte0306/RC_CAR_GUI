@@ -2,6 +2,7 @@ import socket
 from threading import Lock, Event
 import logging
 import select
+import time
 
 from utils.utilities import Signal
 
@@ -22,13 +23,14 @@ class TCP:
         self.__timeout: float | None = timeout
         self.__log_timeouts: bool = log_timeouts
 
-        # Try to increase the OS receive buffer to reduce chance of ENOBUFS/10040
+        # Increase OS buffer sizes to reduce blocking during large transfers
         try:
-            desired_buf = 1280 * 720 *4 * 3  # 256 KiB
+            desired_buf = 16 * 1024 * 1024  # 16 MiB for both send and receive
             self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, desired_buf)
-            logging.info("Set TCP socket SO_RCVBUF to %d", desired_buf)
+            self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, desired_buf)
+            logging.info("Set TCP socket SO_RCVBUF and SO_SNDBUF to %d bytes", desired_buf)
         except Exception:
-            logging.debug("Could not set SO_RCVBUF on TCP socket; continuing with defaults")
+            logging.debug("Could not set TCP socket buffers; continuing with defaults")
 
         self.__shutdown_event = Event()
 
@@ -68,6 +70,10 @@ class TCP:
             logging.error("Failed to bind TCP socket: %s", e)
             return False
 
+    def bind(self, ip: str = "0.0.0.0", srcPort: int = 0) -> bool:
+        """Explicit bind API. Use srcPort=0 for ephemeral local port."""
+        return self.bindSocket(srcPort=srcPort, ip=ip)
+
 
     def set_timeout(self, timeout: float) -> None:
         """
@@ -93,7 +99,7 @@ class TCP:
             except Exception:
                 pass
             self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.__socket.setblocking(False)
+            self.__socket.setblocking(True)
             if self.__timeout is not None:
                 self.__socket.settimeout(self.__timeout)
             if self.__local_bind is not None:
@@ -119,8 +125,23 @@ class TCP:
             logging.error("TCP connect timeout to %s:%s", target[0], target[1])
             return False
 
+        try:
+            self.__socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception:
+            logging.debug("Could not set TCP options (TCP_NODELAY, SO_KEEPALIVE)")
+
         self.__connected_addr = target
         return True
+
+    def connect(self, ip: str, port: int | None = None) -> bool:
+        """Explicit connect API that also sets/overrides destination port when provided."""
+        if port is not None:
+            if not isinstance(port, int) or port <= 0:
+                logging.error("Invalid TCP destination port: %s", port)
+                return False
+            self.__dstPort = port
+        return self._ensure_connected(ip)
 
 
     def send(self, data: bytes, ip: str = None) -> bool:
@@ -146,36 +167,65 @@ class TCP:
         if not self._ensure_connected(dest_ip):
             return False
 
-        max_tries = 5
-        for attempt in range(1, max_tries + 1):
+        if not data:
+            return True
+
+        payload = memoryview(data)
+        total_sent = 0
+        would_block_count = 0
+        deadline = time.monotonic() + 120.0  # 2-minute timeout for large transfers
+
+        while total_sent < len(payload):
             try:
-                self.__socket.sendall(data)
-                return True
-            except BlockingIOError as e:
-                # Non-blocking socket send queue is temporarily full.
-                if attempt < max_tries:
-                    # Wait briefly for socket writability, then retry.
-                    select.select([], [self.__socket], [], 0.01 * attempt)
-                    continue
-                logging.error("Failed to send UDP data after retries (would-block): %s", e)
-                return False
+                sent = self.__socket.send(payload[total_sent:])
+                if sent == 0:
+                    logging.error("TCP socket closed while sending data")
+                    self.__connected_addr = None
+                    return False
+                total_sent += sent
+                would_block_count = 0
+                continue
+            except BlockingIOError:
+                pass
             except OSError as e:
-                # On Windows this may surface as WinError 10035 / errno WSAEWOULDBLOCK.
                 win_err = getattr(e, "winerror", None)
                 errno_val = getattr(e, "errno", None)
-                if win_err == 10035 or errno_val in (socket.EWOULDBLOCK, getattr(socket, "WSAEWOULDBLOCK", 10035)):
-                    if attempt < max_tries:
-                        select.select([], [self.__socket], [], 0.01 * attempt)
-                        continue
-                    logging.error("Failed to send TCP data after retries (would-block): %s", e)
+                is_would_block = (
+                    win_err == 10035
+                    or errno_val in (socket.EWOULDBLOCK, getattr(socket, "WSAEWOULDBLOCK", 10035))
+                )
+                if not is_would_block:
+                    logging.error("Failed to send TCP data: %s", e)
                     return False
-                logging.error("Failed to send TCP data: %s", e)
-                return False
             except Exception as e:
                 logging.error("Failed to send TCP data: %s", e)
                 return False
-        
-        return False
+
+            would_block_count += 1
+            if time.monotonic() >= deadline:
+                logging.error(
+                    "Failed to send TCP data after waiting for writable socket (sent %s/%s bytes, would-block retries=%s)",
+                    total_sent,
+                    len(payload),
+                    would_block_count,
+                )
+                return False
+
+            wait_s = min(0.005 * (2 ** min(would_block_count, 6)), 0.2)
+            _, writable, exceptional = select.select([], [self.__socket], [self.__socket], wait_s)
+            if exceptional:
+                logging.error("TCP socket entered exceptional state while sending")
+                self.__connected_addr = None
+                return False
+            if writable:
+                if would_block_count > 10:
+                    logging.debug("TCP send buffer was full; waited for %d retries", would_block_count)
+            else:
+                if would_block_count > 20:
+                    logging.warning("TCP socket send buffer still full after %d retries (%.1f sec)",
+                                  would_block_count, time.monotonic() - (deadline - 30.0))
+
+        return True
 
 
     def receive_data(self, size : int = 65507) -> bytes | None:

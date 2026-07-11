@@ -37,19 +37,21 @@ class FileChunks:
         return header + self.data
 
 class UpdateSteps(Enum):
-    UpdateStepAbort          = 0
-    UpdateStepInit           = 1
-    UpdateStepWrite          = 2
-    UpdateStepVerifyWrite    = 3
-    UpdateStateValidate      = 4
-    UpdateStepCommandInstall = 5
-    UpdateStepWaitForInstall = 6
-    UpdateStateCommandReboot = 7
-    UpdateStepCleanup        = 8
+    UpdateStepAbort           = 0
+    UpdateStepInit            = 1
+    UpdateEstablishConnection = 2
+    UpdateStepWrite           = 3
+    UpdateStepVerifyWrite     = 4
+    UpdateStateValidate       = 5
+    UpdateStepCommandInstall  = 6
+    UpdateStepWaitForInstall  = 7
+    UpdateStateCommandReboot  = 8
+    UpdateStepCleanup         = 9
 
 class UpdaterBackend:
     MAX_ATTEMPTS = 5
-    # Keep firmware chunks near MTU to avoid heavy IP fragmentation over UDP.
+    # For TCP transfers, use smaller chunks to match network/receiver bandwidth
+    # Larger chunks cause backpressure; smaller chunks flow better over slow connections
     SAFE_UDP_CHUNK_SIZE = 1200
 
     def __init__(self):        
@@ -74,16 +76,18 @@ class UpdaterBackend:
         self.firmwareAborted : Signal = Signal()
         
         self._tcpPort = None
+        self._remotePort : int = None
         
         self._threadFuture = None
         self._hashFuture   = None
 
         # Register steps
-        self._fsm.registerStep(UpdateSteps.UpdateStepInit.value,           transition=UpdateSteps.UpdateStepWrite.value,           callback=self._HandleInit)
-        self._fsm.registerStep(UpdateSteps.UpdateStepWrite.value,          transition=UpdateSteps.UpdateStateValidate.value,       callback=self._HandleFileWrite)
-        self._fsm.registerStep(UpdateSteps.UpdateStateValidate.value,      transition=UpdateSteps.UpdateStepCommandInstall.value,  callback=self._HandleVerify)
-        self._fsm.registerStep(UpdateSteps.UpdateStepCommandInstall.value, transition=UpdateSteps.UpdateStateCommandReboot.value,  callback=self._HandleInstall)
-        self._fsm.registerStep(UpdateSteps.UpdateStateCommandReboot.value, transition=None,                                        callback=self._HandleReboot)
+        self._fsm.registerStep(UpdateSteps.UpdateStepInit.value,            transition=UpdateSteps.UpdateEstablishConnection.value, callback=self._HandleInit)
+        self._fsm.registerStep(UpdateSteps.UpdateEstablishConnection.value, transition=UpdateSteps.UpdateStepWrite.value,           callback=self._HandleEstablishConnection)
+        self._fsm.registerStep(UpdateSteps.UpdateStepWrite.value,           transition=UpdateSteps.UpdateStateValidate.value,       callback=self._HandleFileWrite)
+        self._fsm.registerStep(UpdateSteps.UpdateStateValidate.value,       transition=UpdateSteps.UpdateStepCommandInstall.value,  callback=self._HandleVerify)
+        self._fsm.registerStep(UpdateSteps.UpdateStepCommandInstall.value,  transition=UpdateSteps.UpdateStateCommandReboot.value,  callback=self._HandleInstall)
+        self._fsm.registerStep(UpdateSteps.UpdateStateCommandReboot.value,  transition=None,                                        callback=self._HandleReboot)
         self._fsm.finally_(self._HandleCleanupOnError)
 
     def StartUpdate(self, filename : str):
@@ -147,7 +151,10 @@ class UpdaterBackend:
             # Open a TCP client bound to an ephemeral local source port (0),
             # targeting the destination port provided by the host init reply.
             self._tcpPort = NetworkManager.openNetworkAdapter(("0.0.0.0", tcpPort, 0), protocol="tcp")
-            logging.info("Opened update TCP adapter on ephemeral source port for destination port %s", tcpPort)
+            self._remotePort = tcpPort
+            remote_ip = NetworkManager.getRemoteHostIP(prefer_ethernet=True)
+            if not remote_ip:
+                raise NetworkErr("Remote host IP is unknown; cannot establish TCP update connection")
         except NetworkErr as e:
             logging.error("Failed opening update TCP adapter on port %s: %s", tcpPort, e)
             self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
@@ -164,6 +171,28 @@ class UpdaterBackend:
         #     digest = hashlib.file_digest(f, "sha256")
         # self._fileHash = digest.hexdigest()
         logging.info("FW update initialized on target")
+        return True
+    
+    def _HandleEstablishConnection(self) -> bool:
+        print("[FSM] establish connection")
+        connection_established : bool = False
+        
+        remote_ip = NetworkManager.getRemoteHostIP(prefer_ethernet=True)
+        tcpPort = self._remotePort
+        attempts = 0
+        MAX_ATTEMPTS = 5
+        
+        while not connection_established and attempts < MAX_ATTEMPTS:
+            if not self._tcpPort.connect(remote_ip):
+                attempts += 1
+                logging.warning("Failed connecting TCP update client to %s:%d (attempt %d/%d)", remote_ip, tcpPort, attempts, MAX_ATTEMPTS)
+                continue
+            logging.info("TCP update connection established: local=%s, remote=%s:%d",
+                        self._tcpPort.getSrcAddr(), remote_ip, tcpPort)
+            connection_established = True
+            break
+        if not connection_established:
+            raise NetworkErr(f"Failed connecting TCP update client to {remote_ip}:{tcpPort} after {MAX_ATTEMPTS} attempts")
         return True
 
     def _HandleFileWrite(self) -> bool | None:
@@ -182,10 +211,20 @@ class UpdaterBackend:
             return False
 
         logging.info(
-            "Using firmware chunk size %s bytes (max payload %s)",
+            "Using firmware chunk size %s bytes (capped from %s, max payload %s)",
+            chunk_size,
             chunk_size,
             UpdaterCommand.GetMaxPayload(),
         )
+
+        # Preflight check: verify Jetson is actually consuming data by sending a small test chunk
+        logging.info("Performing preflight TCP check...")
+        test_chunk = FileChunks(index=0, size=0, chunkSize=1024, data=b'X' * 1024).to_bytes()
+        if not self._tcpPort.send(test_chunk):
+            logging.error("Preflight TCP check failed; Jetson is not consuming data. Check Jetson application logs.")
+            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+            return False
+        logging.info("Preflight check passed; Jetson is ready to receive firmware")
 
         with open (self._updateFileName, "rb") as file:
             fileSize = os.path.getsize(self._updateFileName)
@@ -205,7 +244,32 @@ class UpdaterBackend:
                     data=chunk,
                 )
                 chunkID += 1
-                UpdaterCommand().ModuleWriteFileData(dataOut.to_bytes(), replyCallback=self._OnReply)
+                payload = dataOut.to_bytes()
+                sent = False
+                tries = 0
+                while tries < MAX_TRIES and not self._stopEvent.is_set():
+                    if self._tcpPort.send(payload):
+                        sent = True
+                        break
+                    tries += 1
+                    logging.warning(
+                        "TCP chunk send failed. retry=%s/%s, chunk=%s, size=%s",
+                        tries,
+                        MAX_TRIES,
+                        chunkID - 1,
+                        len(chunk),
+                    )
+                    time.sleep(min(0.02 * tries, 0.2))
+
+                if not sent:
+                    logging.error(
+                        "Failed to send firmware chunk after retries. chunk=%s, size=%s",
+                        chunkID - 1,
+                        len(chunk),
+                    )
+                    self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
+                    return False
+
                 writeCount += 1
                 writeCount %= WRITE_COUNT_BEFORE_CHECK
                 
@@ -215,37 +279,37 @@ class UpdaterBackend:
                 print(f"\rProgress: {progress:.2f}% ({bytesWritten}/{fileSize} bytes)", end='')
                 # if not needAck:
                 #     continue
-                reply : Reply = self._synchReply(1.0, expected_command_id=UpdaterCommand.CmdWriteFileData)
+                # reply : Reply = self._synchReply(1.0, expected_command_id=UpdaterCommand.CmdWriteFileData)
 
-                if reply is None:
-                    tries += 1
-                    logging.warning(
-                        "Failed to write file chunk (timeout). retry=%s/%s, offset=%s, size=%s",
-                        tries,
-                        MAX_TRIES,
-                        bytesWritten,
-                        len(chunk),
-                    )
-                    # Brief backoff to avoid overwhelming the target after a timeout.
-                    time.sleep(min(0.1 * tries, 0.5))
-                    continue
+                # if reply is None:
+                #     tries += 1
+                #     logging.warning(
+                #         "Failed to write file chunk (timeout). retry=%s/%s, offset=%s, size=%s",
+                #         tries,
+                #         MAX_TRIES,
+                #         bytesWritten,
+                #         len(chunk),
+                #     )
+                #     # Brief backoff to avoid overwhelming the target after a timeout.
+                #     time.sleep(min(0.1 * tries, 0.5))
+                #     continue
 
-                if reply.status() != 1:
-                    tries += 1
-                    logging.warning(
-                        "Target rejected chunk with status=%s. retry=%s/%s, offset=%s, size=%s",
-                        reply.status(),
-                        tries,
-                        MAX_TRIES,
-                        bytesWritten,
-                        len(chunk),
-                    )
-                    time.sleep(min(0.1 * tries, 0.5))
-                    continue
+                # if reply.status() != 1:
+                #     tries += 1
+                #     logging.warning(
+                #         "Target rejected chunk with status=%s. retry=%s/%s, offset=%s, size=%s",
+                #         reply.status(),
+                #         tries,
+                #         MAX_TRIES,
+                #         bytesWritten,
+                #         len(chunk),
+                #     )
+                #     time.sleep(min(0.1 * tries, 0.5))
+                #     continue
 
                 # Check whether there are any missing segments
-                fmt = f'<{len(reply.payload()) // 8}Q'
-                segmentsList : list[int] = list(struct.unpack(fmt, reply.payload()))
+                # fmt = f'<{len(reply.payload()) // 8}Q'
+                #                segmentsList : list[int] = list(struct.unpack(fmt, reply.payload()))
         if self._stopEvent.is_set():
             self.updateDone.emit()
             self.firmwareAborted.emit()

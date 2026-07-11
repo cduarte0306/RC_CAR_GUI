@@ -117,6 +117,13 @@ class NetworkManager:
             # Add to thread pool and start the thread
             self.__searchHostWlanFuture = self.__threadPool.submit(self.__searchHostWlan)
 
+    @staticmethod
+    def getRemoteHostIP(prefer_ethernet: bool = True) -> str | None:
+        """Return the discovered remote host IP, preferring Ethernet when available."""
+        if prefer_ethernet:
+            return _RemoteIps[IfaceId.EthIface.value] or _RemoteIps[IfaceId.WlanIface.value]
+        return _RemoteIps[IfaceId.WlanIface.value] or _RemoteIps[IfaceId.EthIface.value]
+
     def StartConnection(self, hostIP : str, onDeviceConnected: callable = None) -> None:
         import ipaddress
         if not isinstance(hostIP, str):
