@@ -29,6 +29,12 @@ class UDP:
         self.__timeout: float | None = timeout
         self.__log_timeouts: bool = log_timeouts
 
+        # Allow port reuse to recover from unclean shutdown (TIME_WAIT state)
+        try:
+            self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception:
+            logging.debug("Could not set SO_REUSEADDR on UDP socket")
+
         # Try to increase the OS receive buffer to reduce chance of ENOBUFS/10040
         try:
             desired_buf = 1280 * 720 *4 * 3  # 256 KiB

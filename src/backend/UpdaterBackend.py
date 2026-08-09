@@ -42,11 +42,10 @@ class UpdateSteps(Enum):
     UpdateEstablishConnection = 2
     UpdateStepWrite           = 3
     UpdateStepVerifyWrite     = 4
-    UpdateStateValidate       = 5
-    UpdateStepCommandInstall  = 6
-    UpdateStepWaitForInstall  = 7
-    UpdateStateCommandReboot  = 8
-    UpdateStepCleanup         = 9
+    UpdateStepCommandInstall  = 5
+    UpdateStepWaitForInstall  = 6
+    UpdateStepCommandReboot   = 7
+    UpdateStepCleanup         = 8
 
 class UpdaterBackend:
     MAX_ATTEMPTS = 5
@@ -56,6 +55,10 @@ class UpdaterBackend:
 
     def __init__(self):        
         self.__threadPool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="update-fsm")
+        
+        steps : list = [
+            []
+        ]
 
         self._ReplyReceived  : Event  = Event()
         self._stopEvent      : Event  = Event()
@@ -65,13 +68,12 @@ class UpdaterBackend:
         self._updateFileName : str    = None
         self._updateThread   : Thread = None
         self._bytesWritten   : int = 0
-        self._fileHash       : int = 0
         self._fsm            : FSM = FSM()
         
         self._attemptCtr : int = 0
 
         self.updateDone      : Signal = Signal(bool)
-        self.updateProgress  : Signal = Signal()
+        self.updateProgress  : Signal = Signal(int, int)
         self.updateError     : Signal = Signal()
         self.firmwareAborted : Signal = Signal()
         
@@ -84,10 +86,9 @@ class UpdaterBackend:
         # Register steps
         self._fsm.registerStep(UpdateSteps.UpdateStepInit.value,            transition=UpdateSteps.UpdateEstablishConnection.value, callback=self._HandleInit)
         self._fsm.registerStep(UpdateSteps.UpdateEstablishConnection.value, transition=UpdateSteps.UpdateStepWrite.value,           callback=self._HandleEstablishConnection)
-        self._fsm.registerStep(UpdateSteps.UpdateStepWrite.value,           transition=UpdateSteps.UpdateStateValidate.value,       callback=self._HandleFileWrite)
-        self._fsm.registerStep(UpdateSteps.UpdateStateValidate.value,       transition=UpdateSteps.UpdateStepCommandInstall.value,  callback=self._HandleVerify)
-        self._fsm.registerStep(UpdateSteps.UpdateStepCommandInstall.value,  transition=UpdateSteps.UpdateStateCommandReboot.value,  callback=self._HandleInstall)
-        self._fsm.registerStep(UpdateSteps.UpdateStateCommandReboot.value,  transition=None,                                        callback=self._HandleReboot)
+        self._fsm.registerStep(UpdateSteps.UpdateStepWrite.value,           transition=UpdateSteps.UpdateStepCommandInstall.value, callback=self._HandleFileWrite)
+        self._fsm.registerStep(UpdateSteps.UpdateStepCommandInstall.value,  transition=UpdateSteps.UpdateStepCommandReboot.value,  callback=self._HandleInstall)
+        self._fsm.registerStep(UpdateSteps.UpdateStepCommandReboot.value,   transition=None,                                        callback=self._HandleReboot)
         self._fsm.finally_(self._HandleCleanupOnError)
 
     def StartUpdate(self, filename : str):
@@ -122,6 +123,12 @@ class UpdaterBackend:
         # Calculate sha256 sum of file
         print("[FSM] init")
         logging.debug(f"Initializing update with file: {self._updateFileName}")
+        UpdaterCommand().ModuleCleanUpdater(replyCallback=self._OnReply)
+        reply : Reply = self._synchReply(5.0, expected_command_id=UpdaterCommand.CmdCleanUpdater)
+        if reply is None:  # Reply timeout detected for clean updater
+            logging.warning("Reply timeout detected for clean updater")
+            return False
+
         UpdaterCommand().ModuleInitUpdate(replyCallback=self._OnReply, fileName=self._updateFileName)
         reply : Reply = self._synchReply(5.0, expected_command_id=UpdaterCommand.CmdInitUpdate)
         if reply is None:
@@ -166,10 +173,6 @@ class UpdaterBackend:
             
         # Stop camera streaming to prevent conflicts during firmware update
         CameraCommand().ModuleStopStream()
-
-        # with open(self._updateFileName, "rb") as f:
-        #     digest = hashlib.file_digest(f, "sha256")
-        # self._fileHash = digest.hexdigest()
         logging.info("FW update initialized on target")
         return True
     
@@ -197,6 +200,7 @@ class UpdaterBackend:
 
     def _HandleFileWrite(self) -> bool | None:
         print("[FSM] write")
+        # return True
         fileSize : int = 0
         logging.info(f"Starting file write: {self._updateFileName}")
         bytesWritten : int = 0
@@ -204,7 +208,7 @@ class UpdaterBackend:
         writeCount : int = 0
         MAX_TRIES = 5
         WRITE_COUNT_BEFORE_CHECK = 32
-        chunk_size = UpdaterCommand.GetMaxPayload() - FileChunks.HEADER_SIZE
+        chunk_size = UpdaterCommand.GetMaxPayload()
         if chunk_size <= 0:
             logging.error("Invalid updater chunk size: %s", chunk_size)
             self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
@@ -217,38 +221,18 @@ class UpdaterBackend:
             UpdaterCommand.GetMaxPayload(),
         )
 
-        # Preflight check: verify Jetson is actually consuming data by sending a small test chunk
-        logging.info("Performing preflight TCP check...")
-        test_chunk = FileChunks(index=0, size=0, chunkSize=1024, data=b'X' * 1024).to_bytes()
-        if not self._tcpPort.send(test_chunk):
-            logging.error("Preflight TCP check failed; Jetson is not consuming data. Check Jetson application logs.")
-            self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
-            return False
-        logging.info("Preflight check passed; Jetson is ready to receive firmware")
-
         with open (self._updateFileName, "rb") as file:
             fileSize = os.path.getsize(self._updateFileName)
-            numChunks : int = (fileSize + chunk_size - 1) // chunk_size
-            chunkID : int = 0
-            needAck : bool = False
             while not self._stopEvent.is_set():
                 chunk = file.read(chunk_size)
                 if not chunk:
                     break
 
                 tries = 0
-                dataOut : FileChunks = FileChunks(
-                    index=chunkID,
-                    size=fileSize,
-                    chunkSize=len(chunk),
-                    data=chunk,
-                )
-                chunkID += 1
-                payload = dataOut.to_bytes()
                 sent = False
                 tries = 0
                 while tries < MAX_TRIES and not self._stopEvent.is_set():
-                    if self._tcpPort.send(payload):
+                    if self._tcpPort.send(chunk):
                         sent = True
                         break
                     tries += 1
@@ -256,7 +240,7 @@ class UpdaterBackend:
                         "TCP chunk send failed. retry=%s/%s, chunk=%s, size=%s",
                         tries,
                         MAX_TRIES,
-                        chunkID - 1,
+                        writeCount,
                         len(chunk),
                     )
                     time.sleep(min(0.02 * tries, 0.2))
@@ -264,7 +248,7 @@ class UpdaterBackend:
                 if not sent:
                     logging.error(
                         "Failed to send firmware chunk after retries. chunk=%s, size=%s",
-                        chunkID - 1,
+                        writeCount,
                         len(chunk),
                     )
                     self._fsm.trigger(UpdateSteps.UpdateStepCleanup.value)
@@ -275,41 +259,8 @@ class UpdaterBackend:
                 
                 bytesWritten += len(chunk)
                 progress = (bytesWritten / fileSize) * 100
-                self.updateProgress.emit(progress)
-                print(f"\rProgress: {progress:.2f}% ({bytesWritten}/{fileSize} bytes)", end='')
-                # if not needAck:
-                #     continue
-                # reply : Reply = self._synchReply(1.0, expected_command_id=UpdaterCommand.CmdWriteFileData)
+                self.updateProgress.emit(0, progress)
 
-                # if reply is None:
-                #     tries += 1
-                #     logging.warning(
-                #         "Failed to write file chunk (timeout). retry=%s/%s, offset=%s, size=%s",
-                #         tries,
-                #         MAX_TRIES,
-                #         bytesWritten,
-                #         len(chunk),
-                #     )
-                #     # Brief backoff to avoid overwhelming the target after a timeout.
-                #     time.sleep(min(0.1 * tries, 0.5))
-                #     continue
-
-                # if reply.status() != 1:
-                #     tries += 1
-                #     logging.warning(
-                #         "Target rejected chunk with status=%s. retry=%s/%s, offset=%s, size=%s",
-                #         reply.status(),
-                #         tries,
-                #         MAX_TRIES,
-                #         bytesWritten,
-                #         len(chunk),
-                #     )
-                #     time.sleep(min(0.1 * tries, 0.5))
-                #     continue
-
-                # Check whether there are any missing segments
-                # fmt = f'<{len(reply.payload()) // 8}Q'
-                #                segmentsList : list[int] = list(struct.unpack(fmt, reply.payload()))
         if self._stopEvent.is_set():
             self.updateDone.emit()
             self.firmwareAborted.emit()
@@ -319,30 +270,49 @@ class UpdaterBackend:
 
         # Update is done
         logging.info("File write finalized")
-        self.updateProgress.emit(100)
+        self.updateProgress.emit(0, 100)
         return True
 
-    def _HandleVerify(self) -> bool | None:
-        print("[FSM] Verify")
-        return True
-        # Send the checksum and request from the device
-        UpdaterCommand().ModuleVerifyFile(ctypes.c_uint64(self._fileHash), self._HandleVerify)
-        status = self._replyQueue.get()
-        if status is None:
-            logging.error("Target reported CRC mismatch. Aborting update...")
-            self._fsm.kill()
-
-        return True
-    
     def _HandleInstall(self) -> None:
         print("[FSM] Install")
+        UpdaterCommand().ModuleApplyUpdate(replyCallback=self._OnReply)
+        reply = self._synchReply(timeout=5.0, expected_command_id=UpdaterCommand.CmdInstallUpdate)
+        if reply is None:
+            logging.error("No reply received for install update command")
+        elif reply.status() != 1:
+            logging.error("Install update failed with status: %s", reply.status())
+
+        logging.info("Waiting for install update to complete...")
+        progress : int = 0
+        while progress < 100 and not self._stopEvent.is_set():
+            UpdaterCommand().ModuleQueryUpdateStatus(replyCallback=self._OnReply)
+            reply = self._synchReply(timeout=5.0, expected_command_id=UpdaterCommand.CmdQueryUpdateStatus)
+            if reply is None:
+                logging.warning("No reply received for install update progress")
+                continue
+            if reply.status() != 1:
+                logging.error("Install update progress failed with status: %s", reply.status())
+                break
+            payload = reply.payload()
+            if payload is None or len(payload) < ctypes.sizeof(ctypes.c_int):
+                logging.error("Invalid payload in install update progress reply (len=%s)", 0 if payload is None else len(payload))
+                break
+            progress = ctypes.c_int.from_buffer_copy(payload).value
+            print(f"[FSM] Install progress: {progress}%")
+            self.updateProgress.emit(1, progress)
+            time.sleep(1)
+        logging.info("Install update completed with progress: %s", progress)
         return True
-        pass
-    
+
     def _HandleReboot(self) -> None:
         print("[FSM] Reboot")
+        # Send the reboot command to the target
+        logging.info("Sending reboot command to target")
+        CommandBus().ModuleFinalize(replyCallback=self._OnReply)
+        reply = self._synchReply(timeout=5.0, expected_command_id=UpdaterCommand.CmdUpdaterFinalize)
+        if reply is None:
+            logging.error("No reply received for reboot command")
         return True
-        pass
 
     def _HandleIdle(self) -> bool | None:
         TIMEOUT    = 5
@@ -353,6 +323,7 @@ class UpdaterBackend:
             time.sleep(1)
             
         self._stopWaitEvent.clear()
+        return True
 
     def _HandleCleanupOnError(self) -> None:
         print("[FSM] Cleanup on Error")

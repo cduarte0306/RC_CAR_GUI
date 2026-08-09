@@ -500,11 +500,12 @@ class CameraCommand(Command):
         self.status = data.get("status") 
 
 class UpdaterCommand(Command):
-    CmdInitUpdate    = 1
-    CmdWriteFileData = 2
-    CmdVerifyFile    = 3
-    CmdInstallUpdate = 4
-    CmdReboot        = 5
+    CmdInitUpdate        = 1
+    CmdWriteFileData     = 2
+    CmdInstallUpdate     = 3
+    CmdQueryUpdateStatus = 4
+    CmdCleanUpdater      = 5
+    CmdUpdaterFinalize   = 6
 
     _pack_ = 1
     _fields_ = [
@@ -531,15 +532,23 @@ class UpdaterCommand(Command):
     def ModuleWriteFileData(self, file_data: bytes, replyCallback: callable = None, blocking=False) -> None:
         # logging.debug("Writing file data of length: %d", len(file_data))
         self.dispatchCommand(self.CmdWriteFileData, 0, payload=file_data, replyCallback=replyCallback)
-    
-    def ModuleVerifyFile(self, hash : ctypes.c_uint64, replyCallback: callable = None, blocking=False) -> None:
-        logging.info("Verifying file with hash: %s", hash)
-        self.dispatchCommand(self.CmdVerifyFile, 0, replyCallback=replyCallback)
-    
+
     def ModuleApplyUpdate(self, replyCallback: callable = None, blocking=False) -> None:
         logging.info("Applying update")
         self.dispatchCommand(self.CmdInstallUpdate, 0, replyCallback=replyCallback)
-    
+
+    def ModuleQueryUpdateStatus(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Querying update status")
+        self.dispatchCommand(self.CmdQueryUpdateStatus, 0, replyCallback=replyCallback)
+
+    def ModuleCleanUpdater(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Cleaning updater")
+        self.dispatchCommand(self.CmdCleanUpdater, 0, replyCallback=replyCallback)
+
+    def ModuleFinalize(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Rebooting system")
+        self.dispatchCommand(self.CmdUpdaterFinalize, 0, replyCallback=replyCallback)
+
     def getBytes(self) -> bytes:
         # Implement serialization logic specific to updater commands if needed
         return super().getBytes()  # Or provide custom serialization

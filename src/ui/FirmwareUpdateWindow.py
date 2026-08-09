@@ -362,6 +362,10 @@ class FirmwareUpdateWindow(QWidget):
         self._set_status("Downloading firmware...")
         self._progress.setValue(int(prog))
 
+    def SetInstallProgress(self, prog : int) -> None:
+        self._set_status("Installing firmware...")
+        self._progress.setValue(prog)
+
     def OnFwError(self) -> None:
         logging.error("Detected error during firmware update")    
     

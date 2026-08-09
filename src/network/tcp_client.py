@@ -23,6 +23,12 @@ class TCP:
         self.__timeout: float | None = timeout
         self.__log_timeouts: bool = log_timeouts
 
+        # Allow port reuse to recover from unclean shutdown (TIME_WAIT state)
+        try:
+            self.__socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception:
+            logging.debug("Could not set SO_REUSEADDR on TCP socket")
+
         # Increase OS buffer sizes to reduce blocking during large transfers
         try:
             desired_buf = 16 * 1024 * 1024  # 16 MiB for both send and receive

@@ -198,7 +198,7 @@ class Emitter:
         self.value_changed.emit(new_value)
 
 class FSM:
-    def __init__(self, retries = None):
+    def __init__(self, stepList : list = None, retries = None):
         self._steps: dict[int, tuple[int | None, callable]] = {}
         self._currStep: int   = None
         self._lastStep: int   = None

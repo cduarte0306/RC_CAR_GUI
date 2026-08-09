@@ -54,6 +54,7 @@ class BackendIface(QThread):
     
     updaterError                = pyqtSignal()               # Updater error
     updaterProgress             = pyqtSignal(float)          # Update progress signal
+    updaterInstallProgress             = pyqtSignal(float)          # Update progress signal
     updaterFinished             = pyqtSignal()               # Updater finished signal
     updaterAborted              = pyqtSignal()               # Updater aborted signal
     
@@ -123,7 +124,7 @@ class BackendIface(QThread):
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
 
-        self.__updaterBacked.updateProgress.connect(lambda prog: self.updaterProgress.emit(prog))
+        self.__updaterBacked.updateProgress.connect(self.__updaterProgressCallback)
         self.__updaterBacked.updateDone.connect(lambda: self.updaterFinished.emit())
         self.__updaterBacked.updateError.connect(lambda: self.updaterError.emit())
         self.__updaterBacked.firmwareAborted.connect(lambda: self.updaterAborted.emit())
@@ -382,6 +383,12 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
             
+            
+    def __updaterProgressCallback(self, type : int, progress: float) -> None:
+        if type == 0:  # Assuming 0 represents general progress
+            self.updaterProgress.emit(progress)
+        elif type == 1:  # Assuming 1 represents install progress
+            self.updaterInstallProgress.emit(progress)
     
     def __endingVideoTransmission(self) -> None:
         """

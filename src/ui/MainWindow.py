@@ -941,6 +941,7 @@ class MainWindow(QMainWindow):
         
         # Updater signals to window
         self.__consumer.updaterProgress.connect(lambda prog: self.__fwWindow.setProgress(prog))
+        self.__consumer.updaterProgress.connect(lambda prog: self.__fwWindow.SetInstallProgress(prog))
         self.__consumer.updaterError.connect(self.__fwWindow.OnFwError)
         self.__consumer.updaterFinished.connect(self.__fwWindow.OnFwFinished)
         self.__consumer.updaterAborted.connect(self.__fwWindow.OnFwAborted)
