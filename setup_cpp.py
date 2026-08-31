@@ -13,6 +13,7 @@ This script handles:
 import os
 import sys
 import shutil
+import stat
 import subprocess
 import argparse
 from pathlib import Path
@@ -161,20 +162,41 @@ def find_msvc():
     return False
 
 
+def _force_rmtree(path):
+    """Remove a directory tree, clearing read-only bits on Windows.
+
+    Fetched dependencies (e.g. Open3D) contain a full .git tree whose object
+    files are read-only; plain shutil.rmtree fails on them with WinError 5.
+    """
+    def _on_error(func, target, _exc):
+        # Clear the read-only attribute and retry the failed operation.
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except Exception as exc:
+            print_error(f"Could not remove {target}: {exc}")
+
+    # shutil swapped `onerror` for `onexc` in Python 3.12; support both.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_on_error)
+    else:
+        shutil.rmtree(path, onerror=_on_error)
+
+
 def clean_build(build_dir, python_modules_dir):
     """Clean build artifacts"""
     print_header("Cleaning Build Artifacts")
-    
+
     if build_dir.exists():
         print_info(f"Removing {build_dir}")
-        shutil.rmtree(build_dir)
+        _force_rmtree(build_dir)
         print_success("Build directory cleaned")
-    
+
     if python_modules_dir.exists():
         print_info(f"Removing {python_modules_dir}")
-        shutil.rmtree(python_modules_dir)
+        _force_rmtree(python_modules_dir)
         print_success("Python modules directory cleaned")
-    
+
     print_success("Clean complete!")
 
 
@@ -258,7 +280,14 @@ def is_configured(build_dir, build_type, use_cuda):
     # For Ninja builds, must have build.ninja
     if not ninja_file.exists():
         return False
-    
+
+    # build.ninja includes CMakeFiles/rules.ninja; if that was lost (e.g. an
+    # interrupted clean), ninja aborts on the missing include. Treat a broken
+    # ninja graph as unconfigured so we reconfigure instead of failing the build.
+    if not (build_dir / "CMakeFiles" / "rules.ninja").exists():
+        print_info("Incomplete Ninja build files detected, reconfiguring...")
+        return False
+
     # Check if settings match
     try:
         cache_content = cache_file.read_text()
@@ -359,6 +388,13 @@ def configure_cmake(cmake_path, source_dir, build_dir, build_type="Release", gen
         if cuda_nvcc and os.path.exists(cuda_nvcc):
             base_cmd.append(f"-DCMAKE_CUDA_COMPILER={cuda_nvcc}")
             base_cmd.append(f"-DCUDAToolkit_ROOT={cuda_root}")
+            # The Visual Studio generator ignores CMAKE_CUDA_COMPILER and loads
+            # the highest CUDA integration found in MSBuild BuildCustomizations.
+            # If a newer toolkit was uninstalled but its .targets linger, configure
+            # fails on a missing toolkit dir. Pin the toolset to the toolkit we found.
+            if "Visual Studio" in GEN:
+                base_cmd.append(f"-Tcuda={cuda_root}")
+                print_info(f"Pinning VS CUDA toolset to {cuda_root}")
             # Also set environment variable so CUDA tools use correct path
             os.environ["CUDA_PATH"] = cuda_root
             print_info(f"Using CUDA 12.x for Open3D compatibility: {cuda_root}")

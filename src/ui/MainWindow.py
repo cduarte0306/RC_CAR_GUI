@@ -286,7 +286,8 @@ class ClickableLabel(QLabel):
         if callable(self._callback):
             try:
                 self._callback()
-            except Exception:
+            except Exception as e:
+                logging.error("Error in ClickableLabel callback: %s", e)
                 pass
         super().mousePressEvent(event)
 
@@ -316,10 +317,30 @@ class DeviceTile(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self._baseTooltip = tooltip
+        self._version: str = ""
+
         self.iconLabel = ClickableLabel(pixmap, tooltip=tooltip, callback=connect_callback, parent=self)
         self.iconLabel.setFixedSize(72, 72)
         self.iconLabel.setScaledContents(True)
         layout.addWidget(self.iconLabel, 0, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.versionBadge = QLabel("", self)
+        self.versionBadge.setStyleSheet(
+            """
+            QLabel {
+                background: rgba(11, 17, 28, 220);
+                color: #36e0b8;
+                border: 1px solid rgba(54,224,184,0.55);
+                border-radius: 8px;
+                padding: 1px 5px;
+                font-size: 9px;
+                font-weight: 700;
+            }
+            """
+        )
+        self.versionBadge.setVisible(False)
+        layout.addWidget(self.versionBadge, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         self._adapterMenu = QMenu(self)
         self._adapterMenu.setStyleSheet(
@@ -407,9 +428,21 @@ class DeviceTile(QWidget):
         self._updateAdapterButtonText()
 
 
-    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+    def _applySelectedAdapterIp(self, adapter_ip: str) -> None:
         self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
         self._updateAdapterButtonText()
+
+
+    def setVersion(self, version: str) -> None:
+        """Show the connected device's firmware version as a badge and in the tooltip."""
+        self._version = (version or "").strip()
+        if self._version:
+            self.versionBadge.setText(f"v{self._version}")
+            self.versionBadge.setVisible(True)
+            self.iconLabel.setToolTip(f"{self._baseTooltip}\nFirmware: {self._version}")
+        else:
+            self.versionBadge.setVisible(False)
+            self.iconLabel.setToolTip(self._baseTooltip)
 
 
     def _formatAdapterBadge(self, adapter_ip: str, options: list[NetworkInterfaceOption]) -> tuple[str, str]:
@@ -479,7 +512,7 @@ class DeviceTile(QWidget):
         except Exception:
             adapter_ip = "0.0.0.0"
 
-        self.setSelectedAdapterIp(adapter_ip)
+        self._applySelectedAdapterIp(adapter_ip)
         if callable(self._adapter_selected_callback):
             try:
                 self._adapter_selected_callback(adapter_ip)
@@ -594,14 +627,14 @@ class WelcomeWindow(QWidget):
     def configureAdapterPicker(self, adapter_provider, selected_adapter_ip: str, adapter_selected_callback=None) -> None:
         self._adapter_provider = adapter_provider
         self._adapter_selected_callback = adapter_selected_callback
-        self.setSelectedAdapterIp(selected_adapter_ip)
+        self._applySelectedAdapterIp(selected_adapter_ip)
 
 
-    def setSelectedAdapterIp(self, adapter_ip: str) -> None:
+    def _applySelectedAdapterIp(self, adapter_ip: str) -> None:
         self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
         for tile in self._device_tiles:
             try:
-                tile.setSelectedAdapterIp(self._selected_adapter_ip)
+                tile._applySelectedAdapterIp(self._selected_adapter_ip)
             except Exception:
                 pass
 
@@ -654,12 +687,20 @@ class WelcomeWindow(QWidget):
 
 
     def _onAdapterSelected(self, adapter_ip: str) -> None:
-        self.setSelectedAdapterIp(adapter_ip)
+        self._applySelectedAdapterIp(adapter_ip)
         if callable(self._adapter_selected_callback):
             try:
                 self._adapter_selected_callback(adapter_ip)
             except Exception:
                 pass
+
+
+    def updateDeviceVersion(self, ip: str, version: str) -> None:
+        """Show the firmware version on the tile for the given device IP, if present."""
+        for tile in self._device_tiles:
+            if getattr(tile, "_device_ip", None) == ip:
+                tile.setVersion(version)
+                break
 
 
 class BatteryIndicator(QWidget):
@@ -847,12 +888,6 @@ class MainWindow(QMainWindow):
         
         # import UI consumer
         self.__consumer = BackendIface()
-        self.__adapter_ip = self.__consumer.getVideoOutAdapterIp()
-        self.__welcomeWindow.configureAdapterPicker(
-            self.__listAdapterOptions,
-            self.__adapter_ip,
-            self.__onAdapterIpSelected,
-        )
 
         # Disable side buttons until a device is connected
         self.side.btnTelem.setEnabled(False)
@@ -944,6 +979,18 @@ class MainWindow(QMainWindow):
         self.__consumer.videoListLoaded.connect(self.__streamWindow.updateDeviceVideoList)
         self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
         
+        # Updater signals to window
+        self.__consumer.updaterProgress.connect(lambda msg, prog: self.__fwWindow.setProgress(msg, prog))
+        self.__consumer.updaterInstallProgress.connect(lambda prog: self.__fwWindow.SetInstallProgress(prog))
+        self.__consumer.updaterError.connect(self.__fwWindow.OnFwError)
+        self.__consumer.updaterFinished.connect(self.__fwWindow.OnFwFinished)
+        self.__consumer.installStarted.connect(self.__fwWindow.OnInstallStarted)
+        self.__consumer.updaterAborted.connect(self.__fwWindow.OnFwAborted)
+
+        # 3D point-cloud view: give the stream window the renderer object so it
+        # can create/embed/pump the Open3D window on the GUI thread.
+        self.__streamWindow.setRenderer3DProvider(self.__consumer.getRenderer3D)
+
         self.__streamWindow.stereoMonoModeChanged.connect(self.__consumer.setStereoMonoMode)
         self.__streamWindow.uploadVideoClicked.connect(self.__consumer.uploadVideoFile)
         self.__streamWindow.cameraSourceSelected.connect(self.__consumer.setCameraSource)
@@ -975,8 +1022,15 @@ class MainWindow(QMainWindow):
         self.__streamWindow.deviceVideoLoadRequested.connect(self.__consumer.loadDeviceVideo)
         self.__streamWindow.deviceVideoDeleteRequested.connect(self.__consumer.deleteDeviceVideo)
         self.side.btnFw.clicked.connect(lambda: self.__showFirmware())
+        
+        # Firmware update signals (Window <-> Backend)
+        self.__fwWindow.initUpdate.connect(self.__consumer.initUpdate) # Placeholder
+        self.__fwWindow.requestCancel.connect(self.__cancelUpdate) # Connect the cancel request signal to the cancel update method
 
-
+    def __cancelUpdate(self) -> None:
+        self.__fwWindow.setProgress("Update cancelled", 0)
+        self.__consumer.abortUpdate()
+        
     def __routeTlm(self, raw_payload : bytes) -> None:
         """
         Route telemetry data to appropriate windows
@@ -1100,6 +1154,7 @@ class MainWindow(QMainWindow):
 
     def __onDeviceDiscovered(self, ip: str) -> None:
         """Add a discovered device to the welcome window with hover tooltip and click-to-connect."""
+        logging.info(f"Discovered device at {ip}")
         # Use a car icon from icons/ folder
         icon_path = "icons/rc-car.png"
         self.__welcomeWindow.addDevice(icon_path, ip, connect_callback=lambda: self.__consumer.connectToDevice(ip))
@@ -1107,14 +1162,17 @@ class MainWindow(QMainWindow):
         self.__welcomeWindow.setStartButtonState(False)
 
 
-    def __onDeviceConnected(self, ip: str) -> None:
+    def __onDeviceConnected(self, info: tuple[str, str]) -> None:
         """Enable the side panel buttons once a connection to the device is initiated."""
+        ip, version = info
         self.side.btnTelem.setEnabled(True)
         self.side.btnVideo.setEnabled(True)
         self.side.btnFw.setEnabled(True)
         self.side.btnGPS.setEnabled(True)
-        self.__setStatusChip(f"Connected - {ip}", "connected")
+        status_text = f"Connected - {ip}" + (f" (fw {version})" if version else "")
+        self.__setStatusChip(status_text, "connected")
         self.__welcomeWindow.setStartButtonState(False)
+        self.__welcomeWindow.updateDeviceVersion(ip, version)
         self.__streamWindow.autoStartStreamOut()
         # Visually mark the connected device in the welcome panel
         if hasattr(self.__welcomeWindow, "_devices_layout"):

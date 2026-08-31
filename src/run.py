@@ -1,5 +1,5 @@
-from car_controls.controller import Controller
-from car_controls.VideoStreaming import VideoStreamer
+from backend.controller import Controller
+from backend.VideoStreaming import VideoStreamer
 import logging
 import os
 import configparser

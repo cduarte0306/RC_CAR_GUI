@@ -2,6 +2,8 @@ import threading
 import logging
 import queue
 import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 class Toolbox:
 
@@ -66,6 +68,19 @@ class CircularBuffer:
         self.__size = size
         self.__list : list = [None] * size
         self.__lock = threading.Lock()
+        self.__notEmptySignal = threading.Condition(self.__lock)
+        
+        
+    def flush(self):
+        """
+        Flush the buffer by resetting head and tail pointers.
+        """
+        with self.__lock:
+            self.__head = 0
+            self.__tail = 0
+            
+            # Notify any waiting threads that the buffer is now empty
+            self.__notEmptySignal.notify_all()
         
 
     def push(self, val):
@@ -76,8 +91,11 @@ class CircularBuffer:
             val (_type_): _description_
         """
         with self.__lock:
+            isEmptyBeforePush = self.__head == self.__tail            
             self.__list[self.__head] = val
             self.__head = (self.__head + 1) % self.__size
+            if isEmptyBeforePush:
+                self.__notEmptySignal.notify_all()
 
     
     def empty(self) -> bool:
@@ -94,16 +112,23 @@ class CircularBuffer:
         return cond
     
 
-    def read(self) -> None:
+    def read(self, timeout=None) -> None:
         """
-        Read and pop from the buffer
+        Read and pop from the buffer. (Blocking)
+
+        Args:
+            timeout (float | None): Maximum time to wait for an item. None means wait indefinitely.
 
         Returns:
-            int | None: _description_
+            int | None: The next item from the buffer, or None if timeout occurs.
         """
         with self.__lock:
             if self.__head == self.__tail:
-                return None
+                if timeout is None:
+                    return None
+                else:
+                    if not self.__notEmptySignal.wait(timeout):
+                        return None
             
             val = self.__list[self.__tail]
             self.__tail = (self.__tail + 1) % self.__size
@@ -128,11 +153,6 @@ class Signal:
         with self._lock:
             if callback not in self._callbacks:
                 self._callbacks.append(callback)
-                
-    
-    def setName(self, name: str) -> None:
-        """Set a human-readable name for this signal (used in logging)."""
-        self._name = name
 
 
     def disconnect(self, callback):
@@ -176,4 +196,81 @@ class Emitter:
         print(f"Setting value to: {new_value}")
         # Emit the signal when the value changes
         self.value_changed.emit(new_value)
+
+class FSM:
+    class FSMException(Exception):
+        pass
     
+    def __init__(self, stepList : list = None, retries = None):
+        self._steps: dict[int, tuple[int | None, callable]] = {}
+        self._currStep: int   = None
+        self._lastStep: int   = None
+        self._finished: bool  = False
+        self._aborted : bool = False
+        self._maxRetries: int = retries
+        self._numTries: int = 0
+        self._finallyCallback : callable = None
+        
+    def reset(self) -> None:
+        pass
+
+    def registerStep(self, step: int, transition: int = None, callback : callable=None) -> None:
+        if not isinstance(step, int):
+            raise Exception("Step type requires int")
+        if step in self._steps:
+            raise Exception(f"Step {step} already exists")
+        self._steps[step] = (transition, callback)
+        
+    def finally_(self, callback: callable) -> None:
+        self._finallyCallback = callback
+        
+    def trigger(self, step: int) -> None:
+        self._finished = False
+        self._aborted  = False
+        self._run(step)
+      
+    def _run(self, step: int) -> None:
+        self._currStep = step
+
+        """Run the FSM starting from the current step."""
+        while not self._finished and not self._aborted and self._currStep is not None:
+            step = self._currStep
+            self._lastStep = step
+            transition, cb = self._steps[step]
+
+            try:
+                advance = cb()
+            except FSM.FSMException:
+                break
+
+            if self._maxRetries is not None and self._numTries >= self._maxRetries:
+                self._finished = True
+                break
+
+            if self._aborted or not advance:
+                break
+            elif advance is True and transition is not None:
+                self._numTries = 0
+                self._currStep = transition
+            elif transition is None:
+                self._finished = True
+
+        # Call the finalizer callback
+        if self._finallyCallback is not None:
+            self._finallyCallback()
+
+        # Reset state
+        self._currStep = None
+        self._aborted  = False
+        
+        print("FSM finished")
+
+    def setStep(self, step: int) -> None:
+        """Call this from a reply/ack callback once async work for the
+        current step is done — this IS the transition."""
+        self.trigger(step)
+
+    def kill(self) -> None:
+        print("[FSM] Killed")
+        self._currStep = None
+        self._finished = True

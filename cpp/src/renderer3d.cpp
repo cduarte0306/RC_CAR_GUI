@@ -30,6 +30,13 @@ Renderer3D::Renderer3D()
 
 Renderer3D::~Renderer3D() {
     enableVisualizerWindow(false);
+    stopWindow();
+}
+
+void Renderer3D::setCloudDimensions(int width, int height) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    cloudWidth_  = width;
+    cloudHeight_ = height;
 }
 
 void Renderer3D::setClearColor(float r, float g, float b, float a) {
@@ -65,11 +72,120 @@ void Renderer3D::enableVisualizerWindow(bool enable) {
 }
 
 std::uintptr_t Renderer3D::GetWindowId() const {
+    // Return the handle captured at window creation. FindWindow() can't be used
+    // once the window is reparented (a WS_CHILD is no longer a top-level window).
+    return windowHandle_;
+}
+
+bool Renderer3D::startWindow() {
+    if (windowActive_.load()) {
+        return true;  // already created
+    }
+    try {
+        if (!vis.CreateVisualizerWindow("Point Cloud", 1280, 720, 80, 30)) {
+            return false;
+        }
+
+        // Seed with a dummy point so Open3D doesn't spam warnings on empty AABB.
+        pcd->Clear();
+        pcd->points_.push_back(Eigen::Vector3d{0.0, 0.0, 0.0});
+        pcd->colors_.push_back(Eigen::Vector3d{0.0, 0.0, 0.0});
+
+        vis.AddGeometry(pcd);
+        vis.AddGeometry(mesh);
+        vis.GetRenderOption().point_size_ = 3.0;
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            vis.GetRenderOption().background_color_ = Eigen::Vector3d{
+                static_cast<double>(clearColor_[0]),
+                static_cast<double>(clearColor_[1]),
+                static_cast<double>(clearColor_[2]),
+            };
+        }
+
+        viewInitialized_.store(false);
+        stopRequested_.store(false);
 #ifdef _WIN32
-    const HWND hwnd = FindWindowA(nullptr, "Point Cloud");
-    return reinterpret_cast<std::uintptr_t>(hwnd);
+        windowHandle_ = reinterpret_cast<std::uintptr_t>(FindWindowA(nullptr, "Point Cloud"));
+#endif
+        windowActive_.store(true);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Renderer3D::pump() {
+    if (!windowActive_.load()) {
+        return false;
+    }
+    try {
+        std::vector<PointXYZ> points;
+        std::vector<PointRGB> colors;
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            if (hasNewPoints_) {
+                points = std::move(latestPoints_);
+                latestPoints_.clear();
+                hasNewPoints_ = false;
+            }
+            if (m_HasNewColorPoints) {
+                points = std::move(latestPoints_);
+                latestPoints_.clear();
+                colors = std::move(latestColorsPoints_);
+                latestColorsPoints_.clear();
+                m_HasNewColorPoints = false;
+            }
+        }
+
+        if (!points.empty()) {
+            updatePointCloud_(points, colors);
+        }
+
+        if (!vis.PollEvents()) {
+            return false;  // window was closed
+        }
+        vis.UpdateRender();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void Renderer3D::stopWindow() {
+    if (!windowActive_.exchange(false)) {
+        return;  // not active
+    }
+    try {
+        vis.DestroyVisualizerWindow();
+    } catch (...) {
+    }
+    windowHandle_ = 0;
+}
+
+void Renderer3D::embedInto(std::uintptr_t parentHandle) {
+#ifdef _WIN32
+    HWND child = reinterpret_cast<HWND>(windowHandle_);
+    HWND parent = reinterpret_cast<HWND>(parentHandle);
+    if (child == nullptr || parent == nullptr) {
+        return;
+    }
+    // Turn the top-level GLFW window into a borderless child of the Qt host so
+    // the window manager can't pop it back out.
+    LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
+    style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+               WS_MAXIMIZEBOX | WS_SYSMENU | WS_BORDER);
+    style |= WS_CHILD;
+    SetWindowLongPtr(child, GWL_STYLE, style);
+    SetParent(child, parent);
+
+    // Fill the parent's client area; also called again on resize.
+    RECT rc;
+    GetClientRect(parent, &rc);
+    SetWindowPos(child, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                 SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
 #else
-    return 0;
+    (void)parentHandle;
 #endif
 }
 
@@ -245,11 +361,11 @@ void Renderer3D::updatePointCloud_(const std::vector<PointXYZ>& points, const st
     const int W = cloudWidth_;
     const int H = cloudHeight_;
 
-    // Clamp ROI rect (defensive)
-    const int u0 = std::max(0, std::min(roiU0_, W));
-    const int u1 = std::max(0, std::min(roiU1_, W));
-    const int v0 = std::max(0, std::min(roiV0_, H));
-    const int v1 = std::max(0, std::min(roiV1_, H));
+    // Compute pixel ROI from fractional bounds
+    const int u0 = std::max(0, std::min(static_cast<int>(roiU0Frac_ * W), W));
+    const int u1 = std::max(0, std::min(static_cast<int>(roiU1Frac_ * W), W));
+    const int v0 = std::max(0, std::min(static_cast<int>(roiV0Frac_ * H), H));
+    const int v1 = std::max(0, std::min(static_cast<int>(roiV1Frac_ * H), H));
 
     for (size_t i = 0; i < safePoints.size(); i++) {
         const PointXYZ& p = safePoints[i];
