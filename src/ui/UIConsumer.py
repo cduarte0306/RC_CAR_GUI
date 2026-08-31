@@ -53,9 +53,10 @@ class BackendIface(QThread):
     paramsLoaded                = pyqtSignal(dict)           # Emitted when calibration parameters are loaded
     
     updaterError                = pyqtSignal()               # Updater error
-    updaterProgress             = pyqtSignal(float)          # Update progress signal
-    updaterInstallProgress             = pyqtSignal(float)          # Update progress signal
+    updaterProgress             = pyqtSignal(str, float)     # Update progress signal (msg, progress)
+    updaterInstallProgress      = pyqtSignal(float)          # Update progress signal
     updaterFinished             = pyqtSignal()               # Updater finished signal
+    installStarted              = pyqtSignal()               # Install started signal
     updaterAborted              = pyqtSignal()               # Updater aborted signal
     
     # Firmware update signals
@@ -124,10 +125,11 @@ class BackendIface(QThread):
         self.__controller.controllerDisconnected.connect(lambda: self.controllerDisconnected.emit())
         self.__controller.controllerBatteryLevel.connect(lambda level: self.controllerBatteryLevel.emit(level))
 
-        self.__updaterBacked.updateProgress.connect(self.__updaterProgressCallback)
-        self.__updaterBacked.updateDone.connect(lambda: self.updaterFinished.emit())
+        self.__updaterBacked.updateProgress.connect(lambda msg, prog: self.updaterProgress.emit(msg, prog))
+        self.__updaterBacked.updateDone.connect(self._onUpdateDone)
         self.__updaterBacked.updateError.connect(lambda: self.updaterError.emit())
         self.__updaterBacked.firmwareAborted.connect(lambda: self.updaterAborted.emit())
+        self.__updaterBacked.installStarted.connect(lambda: self.updaterInstallStarted.emit())
     
         # Default to disparity (normal) stereo streaming mode
         # self.setCameraSource(False)
@@ -150,7 +152,7 @@ class BackendIface(QThread):
         
         self.__threadCanRun = True
         
-        
+
     def __del__(self):
         
         # This will be called when the object is garbage collected
@@ -216,13 +218,11 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.warning("Failed to persist video_out_adapter_ip to config: %s", exc)
 
-    
     def __clearTimers(self) -> None:
         """
         Clear disconnect timers
         """
         self.__disconnectTimer = 0
-        
 
     def __check_disconnect(self) -> None:
         """
@@ -230,35 +230,15 @@ class BackendIface(QThread):
         """
         if self.__connected_ip == "":
             return
-        
+
         while self.__pingShutdownEvent.is_set() == False:
             time.sleep(1)
             self.__disconnectTimer += 1
             if self.__disconnectTimer >= 2:  # 2 seconds timeout
                 logging.warning("No communication from device %s; assuming disconnected", self.__connected_ip)
-                self.__connected_ip = ""
-                self.__commandBus.flushReplyCache()
+                self.__resetConnectionState()
                 self.notifyDisconnect.emit()
-                self.__disconnectTimer = 0
-                self.__pingShutdownEvent.set()
                 break
-
-
-    def __controllerReplyCallback(self, data: bytes) -> None:
-        """Handle async replies arriving on the controller socket."""
-        try:
-            self.__commandBus.processReply(data)
-        except Exception as exc:
-            logging.error("Failed to emit controller reply: %s", exc)
-
-
-    def __controllerReplyCallbackEth(self, data: bytes) -> None:
-        """Handle async replies arriving on the Ethernet controller socket."""
-        try:
-            self.__commandBus.processReply(data)
-        except Exception as exc:
-            logging.error("Failed to emit ethernet controller reply: %s", exc)
-
 
     def __telemetryReceivedCallback(self, data : bytes) -> None:
         """
@@ -271,8 +251,7 @@ class BackendIface(QThread):
         # these datagrams as video fragments.
         logging.debug("Received telemetry data (%d bytes)", len(data))
         self.__tlmBuffer.push(data)
-        
-        
+
     def __frameSentCallback(self, sent: int, total: int) -> None:
         """
         Frame sent callback
@@ -283,27 +262,6 @@ class BackendIface(QThread):
         """
         self.videoUploadProgress.emit(sent, total)
 
-
-    def __videoReceivedCallback(self, data : bytes) -> None:
-        """
-        Video frame reception callback
-
-        Args:
-            data (bytes): Video frame data
-        """
-        self.__videoStreamer.setFrame(data)
-        
-        
-    def __videoReceivedEthCallback(self, data : bytes) -> None:
-        """
-        Video frame reception callback over Ethernet
-
-        Args:
-            data (bytes): Video frame data
-        """
-        self.__videoStreamer.setFrameEth(data)
-
-
     def __videoStreamOutThread(self, packet:bytes) -> None:
         """
         Video stream out thread
@@ -311,42 +269,6 @@ class BackendIface(QThread):
         ret = self.__videoStreameEthAdapter.send(packet)
         if not ret:
             logging.error("Failed to transmit frame over UDP")
-
-
-    def __looks_like_video_packet(self, data: bytes) -> bool:
-        header_size = ctypes.sizeof(FrameHeader)
-        if len(data) < header_size:
-            return False
-
-        try:
-            frame_hdr = FrameHeader.from_buffer_copy(data[:header_size])
-        except Exception:
-            return False
-
-        frame_type = frame_hdr.frameHeader.frameType
-        frame_side = frame_hdr.frameHeader.frameSide
-        seg_id = frame_hdr.metadata.segmentID
-        num_segs = frame_hdr.metadata.numSegments
-        total_len = frame_hdr.metadata.totalLength
-        seg_len = frame_hdr.metadata.length
-
-        if frame_type not in (0, 1):
-            return False
-        if frame_side not in (0, 1):
-            return False
-        if num_segs <= 0 or seg_id >= num_segs:
-            return False
-        if seg_len <= 0:
-            return False
-        if total_len < seg_len:
-            return False
-        if seg_len > len(data) - header_size:
-            return False
-        if total_len > 10 * 1024 * 1024:
-            return False
-
-        return True
-
 
     def __resolve_mac(self, ip: str) -> str:
         """Attempt to resolve MAC address for the given IP using the ARP cache."""
@@ -382,14 +304,7 @@ class BackendIface(QThread):
             cam_cmd.ModuleClearVideoRecordings()
         except Exception as exc:
             logging.error("Failed to enqueue camera clear buffer command: %s", exc)
-            
-            
-    def __updaterProgressCallback(self, type : int, progress: float) -> None:
-        if type == 0:  # Assuming 0 represents general progress
-            self.updaterProgress.emit(progress)
-        elif type == 1:  # Assuming 1 represents install progress
-            self.updaterInstallProgress.emit(progress)
-    
+
     def __endingVideoTransmission(self) -> None:
         """
         Video transmission ended
@@ -397,8 +312,7 @@ class BackendIface(QThread):
         logging.info("Video transmission ended")
         self.videoUploadFinished.emit()
         self.__loadStoredVideoList()
-        
-    
+
     def __handleParamsReply(self, reply : Reply):
         """
         Handles replies from the load streaming parameters command
@@ -437,7 +351,7 @@ class BackendIface(QThread):
         if not status:
             logging.error("Failed to load stored video list; status=%d", status)
             return
-        
+
         if not reply.payload():
             logging.error("Failed to load stored video list; empty payload")
             return
@@ -668,7 +582,7 @@ class BackendIface(QThread):
 
         # Trigger on device connection signal
         self.deviceConnected.emit(ip)
-        
+
         self.__loadStoredVideoList()
         self.__loadParams()
         self.startVideoStream(True)
@@ -691,33 +605,29 @@ class BackendIface(QThread):
             
         if self.__pingFuture is None or self.__pingFuture.done():
             self.__pingFuture = self.__threadPool.submit(self.__ping_loop)
-        return
-        # Potential place to reconfigure adapters or start sessions
-        self.__videoStreameEthAdapter.setServerIP(ip)
 
-        self.__controller.StartComms()
-        self.deviceConnected.emit(ip)
+    def _onUpdateDone(self, ip: str) -> None:
+        """Handle update completion event."""
+        self.updaterFinished.emit()
+        self.connectToDevice(ip)
+        
+    def _onDeviceRebooted(self) -> None:
+        """Handle device reboot event."""
+        logging.info("Device has rebooted; reinitializing connection and state.")
+        self.__pingShutdownEvent.set()  # Stop the ping loop
+        
+        # Wait for pool to exit
+        if self.__pingFuture is not None:
+            self.__pingFuture.result(timeout=5)
 
-        # Resolve MAC once and emit
-        mac = self.__mac_cache.get(ip) or self.__resolve_mac(ip)
-        if mac:
-            self.__mac_cache[ip] = mac
-        self.deviceMacResolved.emit(ip, mac if mac else "")
-        
-        # Start the constant ping thread to keep connection alive
-        if self.__pingFuture is None or self.__pingFuture.done():
-            self.__pingFuture = self.__threadPool.submit(self.__ping_loop)
-        
-        # Start disconnect timer
-        if self.__disconnectFuture is None or self.__disconnectFuture.done():
-            self.__disconnectFuture = self.__threadPool.submit(self.__check_disconnect)
-        
-        # Load the list of stored videos from the device
-        self.__loadStoredVideoList()
-        self.__loadParams()
-        self.startVideoStream(True)
-        
-    
+        if self.__disconnectFuture is not None:
+            self.__disconnectFuture.result(timeout=5)
+
+        self.__pingShutdownEvent.clear()
+
+        # Reset connection state
+        self.__resetConnectionState()
+
     def setFrameRate(self, fps: int) -> None:
         """
         Set frame rate on the camera
@@ -916,6 +826,12 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue load calibration parameters command: %s", exc)
 
+    def __resetConnectionState(self) -> None:
+        """Reset connection state and notify UI of disconnection."""
+        self.__connected_ip = ""
+        self.__commandBus.flushReplyCache()
+        self.__disconnectTimer = 0
+        self.__pingShutdownEvent.set()
 
     @pyqtSlot(str)
     def loadDeviceVideo(self, videoName: str) -> None:

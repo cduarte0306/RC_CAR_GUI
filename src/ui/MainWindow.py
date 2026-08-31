@@ -940,10 +940,11 @@ class MainWindow(QMainWindow):
         self.__consumer.paramsLoaded.connect(self.__streamWindow.updateSettingsFromParams)
         
         # Updater signals to window
-        self.__consumer.updaterProgress.connect(lambda prog: self.__fwWindow.setProgress(prog))
-        self.__consumer.updaterProgress.connect(lambda prog: self.__fwWindow.SetInstallProgress(prog))
+        self.__consumer.updaterProgress.connect(lambda msg, prog: self.__fwWindow.setProgress(msg, prog))
+        self.__consumer.updaterInstallProgress.connect(lambda prog: self.__fwWindow.SetInstallProgress(prog))
         self.__consumer.updaterError.connect(self.__fwWindow.OnFwError)
         self.__consumer.updaterFinished.connect(self.__fwWindow.OnFwFinished)
+        self.__consumer.installStarted.connect(self.__fwWindow.OnInstallStarted)
         self.__consumer.updaterAborted.connect(self.__fwWindow.OnFwAborted)
 
         # 3D point-cloud view: give the stream window the renderer object so it
@@ -984,9 +985,12 @@ class MainWindow(QMainWindow):
         
         # Firmware update signals (Window <-> Backend)
         self.__fwWindow.initUpdate.connect(self.__consumer.initUpdate) # Placeholder
-        self.__fwWindow.requestCancel.connect(self.__consumer.abortUpdate) # Connect the cancel request signal to the consumer's abort update method
+        self.__fwWindow.requestCancel.connect(self.__cancelUpdate) # Connect the cancel request signal to the cancel update method
 
-
+    def __cancelUpdate(self) -> None:
+        self.__fwWindow.setProgress("Update cancelled", 0)
+        self.__consumer.abortUpdate()
+        
     def __routeTlm(self, raw_payload : bytes) -> None:
         """
         Route telemetry data to appropriate windows

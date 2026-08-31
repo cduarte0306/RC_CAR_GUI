@@ -1,3 +1,5 @@
+import json
+
 from .udp_client import UDP
 from .tcp_client import TCP
 from threading import Thread
@@ -186,7 +188,8 @@ class NetworkManager:
 
         wlanAckReceived = replyReceivedEvent.is_set()
         sock.shutdown()
-        replyReceivedEvent.clear()        
+        replyReceivedEvent.clear()  
+        self.__shutdownEvent.clear()
         self.__ethHandshakeHandler(ethInfo)
 
         logging.info("WLAN handshake with host at %s completed with ACK: %s", hostIP, wlanAckReceived)
@@ -217,26 +220,30 @@ class NetworkManager:
                 return
             logging.info("Received ETH handshake ACK from %s", replyingSrvrAddr)
             handshakeReceived.set()
-        
         logging.info("Starting Ethernet handshake with host IP %s, netmask %s", ethInfo["eth_ip"], ethInfo.get("net_mask"))
-        
+
         # Check if host adapter is compatible with local Ethernet adapter before starting the handshake
         ethIp : str = None
         netmask : str = None
         while ethIp is None and not self.__shutdownEvent.is_set():
             adapters = NetworkManager.determineNicIp()
-            ethIp, netmask = adapters["ethernet"]
+            adapterEntry = adapters["ethernet"]
+            if adapterEntry is None:
+                # No ethernet adapter found, just exit
+                logging.warning("No ethernet adapter found")
+                return
+            else:
+                ethIp, netmask = adapterEntry
             if ethIp is None:
                 logging.info("Ethernet adapter not found; retrying in 5 seconds...")
                 self.__shutdownEvent.wait(5)
-                
+
         # Check if netmask of local eth adapter is compatible with host IP subnet before starting the handshake
         while not NetworkManager.isIpInSubnet(ethInfo["eth_ip"], f"{ethIp}/{netmask}") and not self.__shutdownEvent.is_set():
             logging.info("Host Ethernet IP %s is not in the same subnet as local Ethernet adapter IP %s with netmask %s; retrying in 5 seconds...", ethInfo["eth_ip"], ethIp, netmask)
             self.__shutdownEvent.wait(5)
 
         _IfaceIps[IfaceId.EthIface.value] = ethIp
-
         logging.info("Ethernet adapter found with IP %s, netmask %s; starting handshake listener", ethIp, netmask)
 
         # Open adapter at ethernet
@@ -554,6 +561,30 @@ class NetworkManager:
             socket_wrapper.dataReceived.connect(recvCallback)
 
         return tcp_adapter
+    
+    @staticmethod
+    def isRemoteHostReachable() -> bool:
+        """
+        Check if the remote host is reachable via either Ethernet or Wi-Fi.
+
+        Returns:
+            bool: True if reachable, False otherwise
+        """
+        replyReceivedEvent = Event()
+        sock : UDP = None
+
+    @staticmethod
+    def getRemoteHostIp() -> str | None:
+        """
+        Get the remote host IP address, preferring Ethernet when available.
+
+        Returns:
+            str | None: The remote host IP address if reachable, None otherwise
+        """
+        ip = None
+        while ip is None:
+            ip = NetworkManager.searchHostName()
+        return ip
 
     @staticmethod
     def getUDPAdapter(

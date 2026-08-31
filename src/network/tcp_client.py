@@ -139,6 +139,10 @@ class TCP:
 
         self.__connected_addr = target
         return True
+    
+    def isOpen(self) -> bool:
+        """Check if the TCP socket is currently connected."""
+        return self.__connected_addr is not None
 
     def connect(self, ip: str, port: int | None = None) -> bool:
         """Explicit connect API that also sets/overrides destination port when provided."""
@@ -148,7 +152,6 @@ class TCP:
                 return False
             self.__dstPort = port
         return self._ensure_connected(ip)
-
 
     def send(self, data: bytes, ip: str = None) -> bool:
         """

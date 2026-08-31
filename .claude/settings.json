@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/utils/utilities.py', encoding='utf-8'\\).read\\(\\)\\)\")"
     ]
   }
 }

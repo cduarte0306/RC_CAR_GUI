@@ -500,12 +500,13 @@ class CameraCommand(Command):
         self.status = data.get("status") 
 
 class UpdaterCommand(Command):
-    CmdInitUpdate        = 1
-    CmdWriteFileData     = 2
-    CmdInstallUpdate     = 3
-    CmdQueryUpdateStatus = 4
-    CmdCleanUpdater      = 5
-    CmdUpdaterFinalize   = 6
+    CmdRequestFirmwareRev = 1
+    CmdInitUpdate         = 2
+    CmdWriteFileData      = 3
+    CmdInstallUpdate      = 4
+    CmdQueryUpdateStatus  = 5
+    CmdCleanUpdater       = 6
+    CmdUpdaterFinalize    = 7
 
     _pack_ = 1
     _fields_ = [
@@ -518,15 +519,19 @@ class UpdaterCommand(Command):
         super().__init__(*args, socket=socket, **kwargs)
         self._blocking = blocking
         self.moduleId = ModuleIDs.UpdaterModule.value
-        
+
     @staticmethod
     def GetMaxPayload() -> int:
         return MAX_UDP - ctypes.sizeof(UpdaterCommand)
         # return 32768 - ctypes.sizeof(UpdaterCommand)
-        
+
+    def ModuleRequestRevision(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.info("Requesting firmware revision")
+        self.dispatchCommand(self.CmdRequestFirmwareRev, 0, replyCallback=replyCallback)
+
     def ModuleInitUpdate(self, replyCallback: callable = None, fileName : str = "") -> None:
         payload = fileName.encode('utf-8')
-        logging.info("Initializing update with file: %s", fileName)
+        logging.debug("Initializing update with file: %s", fileName)
         self.dispatchCommand(self.CmdInitUpdate, 0, payload=payload, replyCallback=replyCallback)
 
     def ModuleWriteFileData(self, file_data: bytes, replyCallback: callable = None, blocking=False) -> None:
@@ -534,20 +539,20 @@ class UpdaterCommand(Command):
         self.dispatchCommand(self.CmdWriteFileData, 0, payload=file_data, replyCallback=replyCallback)
 
     def ModuleApplyUpdate(self, replyCallback: callable = None, blocking=False) -> None:
-        logging.info("Applying update")
+        logging.debug("Applying update")
         self.dispatchCommand(self.CmdInstallUpdate, 0, replyCallback=replyCallback)
 
     def ModuleQueryUpdateStatus(self, replyCallback: callable = None, blocking=False) -> None:
-        logging.info("Querying update status")
+        logging.debug("Querying update status")
         self.dispatchCommand(self.CmdQueryUpdateStatus, 0, replyCallback=replyCallback)
 
-    def ModuleCleanUpdater(self, replyCallback: callable = None, blocking=False) -> None:
-        logging.info("Cleaning updater")
-        self.dispatchCommand(self.CmdCleanUpdater, 0, replyCallback=replyCallback)
-
     def ModuleFinalize(self, replyCallback: callable = None, blocking=False) -> None:
-        logging.info("Rebooting system")
+        logging.debug("Rebooting system")
         self.dispatchCommand(self.CmdUpdaterFinalize, 0, replyCallback=replyCallback)
+
+    def ModuleCleanUpdater(self, replyCallback: callable = None, blocking=False) -> None:
+        logging.debug("Cleaning updater")
+        self.dispatchCommand(self.CmdCleanUpdater, 0, replyCallback=replyCallback)
 
     def getBytes(self) -> bytes:
         # Implement serialization logic specific to updater commands if needed
@@ -601,7 +606,7 @@ class CommandBus:
     def __init__(self) -> None:
         self._cmdPipeSockFd = NetworkManager.getUDPAdapter(
             Defines.CONTROLLER_PORT,
-            OnRx=self.processReply,
+            OnRx=self._processReply,
             recvBuffSize=1024
         )
         self._queue: queue.Queue[Command] = queue.Queue()
@@ -609,6 +614,7 @@ class CommandBus:
         self._shutdown = Event()
         self._seq_id = 0
         self._expectedReplyPool : list[Command] = [None] * 65535
+        self._lastAckedReplyID : int = 0
 
         self.enqueueSignal.connect(self.submit)
         self._thread = Thread(target=self._worker, name="command-bus", daemon=True)
@@ -664,8 +670,7 @@ class CommandBus:
         if not ok:
             raise Exception(f"Failed to transmit command: {cmd.command}")
 
-
-    def processReply(self, raw: bytes) -> None:
+    def _processReply(self, raw: bytes) -> None:
         """
         Process a reply callback from command socket
 
@@ -687,17 +692,22 @@ class CommandBus:
             seqID,
         )
 
+        # Check if the message is not associated with a command
+        if seqID == 0xFFFF:
+            
+            return
+
         # Is the command on the bank?
         with self._lock:
             if self._expectedReplyPool[seqID] is None:
                 logging.debug("Command not found in the pool: %d", seqID)
                 return
 
-        # Search in expecting reply bank
-        cmd : Command = self._expectedReplyPool[seqID]
-        if cmd == None:
-            logging.debug("Reply ID %d was not recognized", seqID)
-            return
+            # Search in expecting reply bank
+            cmd : Command = self._expectedReplyPool[seqID]
+            if cmd == None:
+                logging.debug("Reply ID %d was not recognized", seqID)
+                return
 
         logging.debug(
             "Received reply for command with sequence ID %d: commandID=%d, status=%d, payloadLen=%d",
@@ -708,6 +718,7 @@ class CommandBus:
         )
         # Fire the command's reply callback signal
         cmd.emitReplyReceived(reply)
+        self._lastAckedReplyID = seqID
 
         # Delete the object and remove from the bank to free memory and prevent stale matches
         with self._lock:

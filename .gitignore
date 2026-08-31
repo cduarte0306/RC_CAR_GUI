@@ -24,3 +24,6 @@ CMakeFiles/
 # IDE
 .vs/
 .vscode/.vs/
+
+# Runtime config file
+runtime-config.ini

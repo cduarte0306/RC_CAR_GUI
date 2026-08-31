@@ -198,14 +198,21 @@ class Emitter:
         self.value_changed.emit(new_value)
 
 class FSM:
+    class FSMException(Exception):
+        pass
+    
     def __init__(self, stepList : list = None, retries = None):
         self._steps: dict[int, tuple[int | None, callable]] = {}
         self._currStep: int   = None
         self._lastStep: int   = None
         self._finished: bool  = False
+        self._aborted : bool = False
         self._maxRetries: int = retries
         self._numTries: int = 0
         self._finallyCallback : callable = None
+        
+    def reset(self) -> None:
+        pass
 
     def registerStep(self, step: int, transition: int = None, callback : callable=None) -> None:
         if not isinstance(step, int):
@@ -216,36 +223,47 @@ class FSM:
         
     def finally_(self, callback: callable) -> None:
         self._finallyCallback = callback
-
+        
     def trigger(self, step: int) -> None:
-        """Enter a step and run its callback.
-        - callback returns True  -> synchronous step, chain immediately
-        - callback returns None  -> async step; some reply callback
-          will call setStep() later to advance
-        """
-        if self._finished: return
-        if step not in self._steps:
-            raise Exception(f"No registered step: {step}")
-        self._lastStep = self._currStep
+        self._finished = False
+        self._aborted  = False
+        self._run(step)
+      
+    def _run(self, step: int) -> None:
         self._currStep = step
 
-        transition, cb = self._steps[step]
-        advance = cb()
-        
-        if self._maxRetries is not None and self._numTries >= self._maxRetries:
-            self._finished = True
-            return
+        """Run the FSM starting from the current step."""
+        while not self._finished and not self._aborted and self._currStep is not None:
+            step = self._currStep
+            self._lastStep = step
+            transition, cb = self._steps[step]
 
-        if advance is True and transition is not None:
-            self._numTries = 0
-            self.trigger(transition)
-        elif not advance:
-            self._numTries += 1
-        elif transition is None:
-            print("FSM finished")
-            self._finished = True
-            if self._finallyCallback is not None:
-                self._finallyCallback()
+            try:
+                advance = cb()
+            except FSM.FSMException:
+                break
+
+            if self._maxRetries is not None and self._numTries >= self._maxRetries:
+                self._finished = True
+                break
+
+            if self._aborted or not advance:
+                break
+            elif advance is True and transition is not None:
+                self._numTries = 0
+                self._currStep = transition
+            elif transition is None:
+                self._finished = True
+
+        # Call the finalizer callback
+        if self._finallyCallback is not None:
+            self._finallyCallback()
+
+        # Reset state
+        self._currStep = None
+        self._aborted  = False
+        
+        print("FSM finished")
 
     def setStep(self, step: int) -> None:
         """Call this from a reply/ack callback once async work for the
@@ -253,5 +271,6 @@ class FSM:
         self.trigger(step)
 
     def kill(self) -> None:
+        print("[FSM] Killed")
         self._currStep = None
         self._finished = True
