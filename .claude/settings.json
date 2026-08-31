@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python -c ' *)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('src/utils/utilities.py', encoding='utf-8'\\).read\\(\\)\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/utils/utilities.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(python -m py_compile src/ui/MainWindow.py src/ui/UIConsumer.py src/network/NetworkManager.py)"
     ]
   }
 }

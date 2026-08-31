@@ -317,10 +317,30 @@ class DeviceTile(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self._baseTooltip = tooltip
+        self._version: str = ""
+
         self.iconLabel = ClickableLabel(pixmap, tooltip=tooltip, callback=connect_callback, parent=self)
         self.iconLabel.setFixedSize(72, 72)
         self.iconLabel.setScaledContents(True)
         layout.addWidget(self.iconLabel, 0, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.versionBadge = QLabel("", self)
+        self.versionBadge.setStyleSheet(
+            """
+            QLabel {
+                background: rgba(11, 17, 28, 220);
+                color: #36e0b8;
+                border: 1px solid rgba(54,224,184,0.55);
+                border-radius: 8px;
+                padding: 1px 5px;
+                font-size: 9px;
+                font-weight: 700;
+            }
+            """
+        )
+        self.versionBadge.setVisible(False)
+        layout.addWidget(self.versionBadge, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         self._adapterMenu = QMenu(self)
         self._adapterMenu.setStyleSheet(
@@ -411,6 +431,18 @@ class DeviceTile(QWidget):
     def _applySelectedAdapterIp(self, adapter_ip: str) -> None:
         self._selected_adapter_ip = (adapter_ip or "0.0.0.0").strip() or "0.0.0.0"
         self._updateAdapterButtonText()
+
+
+    def setVersion(self, version: str) -> None:
+        """Show the connected device's firmware version as a badge and in the tooltip."""
+        self._version = (version or "").strip()
+        if self._version:
+            self.versionBadge.setText(f"v{self._version}")
+            self.versionBadge.setVisible(True)
+            self.iconLabel.setToolTip(f"{self._baseTooltip}\nFirmware: {self._version}")
+        else:
+            self.versionBadge.setVisible(False)
+            self.iconLabel.setToolTip(self._baseTooltip)
 
 
     def _formatAdapterBadge(self, adapter_ip: str, options: list[NetworkInterfaceOption]) -> tuple[str, str]:
@@ -661,6 +693,14 @@ class WelcomeWindow(QWidget):
                 self._adapter_selected_callback(adapter_ip)
             except Exception:
                 pass
+
+
+    def updateDeviceVersion(self, ip: str, version: str) -> None:
+        """Show the firmware version on the tile for the given device IP, if present."""
+        for tile in self._device_tiles:
+            if getattr(tile, "_device_ip", None) == ip:
+                tile.setVersion(version)
+                break
 
 
 class BatteryIndicator(QWidget):
@@ -1122,15 +1162,17 @@ class MainWindow(QMainWindow):
         self.__welcomeWindow.setStartButtonState(False)
 
 
-    def __onDeviceConnected(self, ip: str) -> None:
+    def __onDeviceConnected(self, info: tuple[str, str]) -> None:
         """Enable the side panel buttons once a connection to the device is initiated."""
-        logging.info(f"Connected to device at {ip}")
+        ip, version = info
         self.side.btnTelem.setEnabled(True)
         self.side.btnVideo.setEnabled(True)
         self.side.btnFw.setEnabled(True)
         self.side.btnGPS.setEnabled(True)
-        self.__setStatusChip(f"Connected - {ip}", "connected")
+        status_text = f"Connected - {ip}" + (f" (fw {version})" if version else "")
+        self.__setStatusChip(status_text, "connected")
         self.__welcomeWindow.setStartButtonState(False)
+        self.__welcomeWindow.updateDeviceVersion(ip, version)
         self.__streamWindow.autoStartStreamOut()
         # Visually mark the connected device in the welcome panel
         if hasattr(self.__welcomeWindow, "_devices_layout"):

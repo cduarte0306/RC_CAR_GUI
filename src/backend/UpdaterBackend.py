@@ -268,6 +268,7 @@ class UpdaterBackend:
     def _HandleInstall(self) -> None:
         print("[FSM] Install")
         self._xfer(UpdaterCommand.CmdInstallUpdate, replyCallback=self._OnReply)
+        self.installStarted.emit()
 
         logging.info("Waiting for install update to complete...")
         progress : int = 0

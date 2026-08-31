@@ -39,7 +39,7 @@ class BackendIface(QThread):
     videoBufferSignalDisparity  = pyqtSignal(object, object) # Disparity frame received signal (left frame and right frame as int)
 
     deviceDiscovered            = pyqtSignal(str)            # Device discovered signal (emits IP)
-    deviceConnected             = pyqtSignal(str)            # Device connected (emits IP)
+    deviceConnected             = pyqtSignal(tuple)            # Device connected (emits IP and version)
     deviceMacResolved           = pyqtSignal(str, str)       # Emits (ip, mac)
     videoModeRequested          = pyqtSignal(str)            # Emits requested camera mode (regular/depth)
     telemetryReceived           = pyqtSignal(bytes)          # Telemetry data received
@@ -571,18 +571,25 @@ class BackendIface(QThread):
         except Exception as exc:
             logging.error("Failed to enqueue stereo-mono mode command: %s", exc)
 
-    def __OnDeviceConnected(self, ip: str) -> None:
+    def __OnDeviceConnected(self, info: str | tuple[str, str]) -> None:
         """Handle device connection event.
 
         Args:
-            ip (str): The IP address of the connected device.
+            info (str | tuple[str, str]): The information of the connected device.
         """
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        logging.info(f"Detected device connection with IP {ip} at {time_str}")
+        logging.info(f"Detected device connection with info {info} at {time_str}")
+        ip : str = ""
+        version : str = ""
 
         # Trigger on device connection signal
-        self.deviceConnected.emit(ip)
+        if isinstance(info, str):
+            ip = info
+        elif isinstance(info, tuple):
+            ip = info[0]
+            version = info[1]
 
+        self.deviceConnected.emit((ip, version))
         self.__loadStoredVideoList()
         self.__loadParams()
         self.startVideoStream(True)

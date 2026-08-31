@@ -153,10 +153,11 @@ class NetworkManager:
         sock : UDP = None
         ethIp : str = None
         hostNetMask : str = None
+        devVersion : str = None
         ethInfo : tuple[str, str] = None
         def handleHandshakeMessageRx(data: bytes):
             self.dataReceived.emit()
-            nonlocal ethInfo
+            nonlocal ethInfo, devVersion
             message = data.decode("utf-8").strip()
             message = json.loads(message.strip())
             # Decode json handshake message and extract host IP if present
@@ -165,9 +166,11 @@ class NetworkManager:
             if message["message"] != "HANDSHAKE_ACK":
                 logging.debug("Ignoring non-ack handshake message '%s' from %s", message, replyingSrvrAddr)
                 return
-            
+
+
             # Decode the ethernet IP
             ethInfo = message
+            devVersion = message.get("version", None)
             logging.info("Received WLAN handshake ACK from %s:\r\n%s", replyingSrvrAddr, json.dumps(ethInfo, indent=4))
             replyReceivedEvent.set()
 
@@ -194,7 +197,7 @@ class NetworkManager:
 
         logging.info("WLAN handshake with host at %s completed with ACK: %s", hostIP, wlanAckReceived)
         if wlanAckReceived and onDeviceConnected is not None:
-            onDeviceConnected(hostIP)
+            onDeviceConnected((hostIP, devVersion or ""))
 
     def __ethHandshakeHandler(self, ethInfo) -> None:
         """
